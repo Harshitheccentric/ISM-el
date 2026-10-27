@@ -23,8 +23,9 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
   unless he says so.
 - If something is unclear or missing, write a TODO in PROGRESS.md and ask. Do not guess.
 - Keep code simple and readable; Harsh must be able to explain every part to his mentor.
-- Download URLs and drive models come only from `docs/data-sources.md` and the audit.
-  Never invent or derive them.
+- Download URLs are listed in `docs/data-sources.md`, or derived (same base,
+  `data_QN_YYYY.zip`) and confirmed by a HEAD request; a failed HEAD = missing quarter,
+  logged and skipped. Drive models come only from the audit (or the config allowlist).
 
 ## Data conventions
 - Read ID columns (serial_number, datacenter, cluster_id, vault_id, pod_id, pod_slot_num)
@@ -32,7 +33,12 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
 - Pod key = datacenter + cluster_id + vault_id + pod_id (pod_id alone is not unique).
 - SMART raw values are 64-bit ints (BIGINT, via TRY_CAST). Use raw values, not normalized.
 - A column missing from a quarter becomes null, never an error.
-- Drop boot drives: empty pod_slot_num or no SMART values (e.g. `DELLBOSS VD`).
+- Boot drives (e.g. `DELLBOSS VD`). Row rule: drop a row with no SMART values at all.
+  Model rule: a model is a boot model if ≥95% of its rows have no SMART values, or ≥95%
+  of its rows have an empty slot in files where the slot column is populated. Boot
+  models are dropped in every quarter (`audit/boot_models.csv`). Never drop single rows
+  for an empty slot (pod fields may roll out gradually).
+- Count TRY_CAST failures (non-empty → NULL) and duplicate (serial, date) rows in the audit.
 - Audit and select per exact model string (MG07ACA14TA ≠ MG07ACA14TEY).
 - Full 2016–2026 range must run on free Colab. Never restrict the range to fit Drive.
 - Raw data is never kept. Per quarter: download zip to /content; read daily CSVs out of

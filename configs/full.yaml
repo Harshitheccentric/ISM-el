@@ -1,0 +1,34 @@
+# Full run: the whole public range. Never shrink it to fit Drive (see CLAUDE.md).
+mode: full
+data_source: backblaze        # backblaze | synthetic (synthetic is for tests only)
+
+# Paths are not hashed. The notebook sets these on Colab.
+root: data/root               # durable tier: audit, Parquet, splits, models, results
+local_dir: data/local         # cache tier + scratch (/content/... on Colab)
+
+start_quarter: 2016Q1
+end_quarter: 2026Q2
+models: []                    # exact model strings; non-empty skips the audit (pass 1)
+
+horizons: [7, 14, 30]         # days
+seed: 42
+
+# SMART attributes kept (raw values only). S: 5 9 187 188 194 197 198; W/N: 241 242.
+smart_ids: [5, 9, 187, 188, 194, 197, 198, 241, 242]
+
+# Model selection by the audit (HANDOFF rule). Ranked by (pod_ok, failures).
+selection:
+  min_failures: 100           # failures inside the model's S/W/N window
+  min_coverage: 0.95          # non-null share of 241/242 (S/W/N) and of pod fields (P)
+  max_models: 3
+  boot_share: 0.95            # boot model: this share of rows with empty slot or no SMART
+
+budget:
+  margin_bytes: 1000000000    # keep this much free on each disk
+  # Estimate per size = max(default, 1.5 x largest measured quarter). Errs high.
+  # Defaults = 1.5 x measured on 2026Q1, the newest and largest quarter (2026-10-27):
+  # zip 1.31 GB, largest day CSV 136 MB, Parquet 497 MB with all 49 non-boot models
+  # (44 MB with the one selected model).
+  default_zip_bytes: 2000000000
+  default_day_bytes: 210000000
+  default_parquet_bytes: 750000000
