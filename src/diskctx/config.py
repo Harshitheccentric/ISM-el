@@ -6,10 +6,14 @@ config keys that stage depends on, so changing an unrelated knob does not force 
 
 import hashlib
 import json
+import os
 import re
 from datetime import date, timedelta
+from pathlib import Path
 
 import yaml
+
+LOCAL_ROOT_ENV = "DISKCTX_LOCAL_ROOT"
 
 MODES = ("smoke", "full")
 DATA_SOURCES = ("backblaze", "synthetic")
@@ -49,9 +53,19 @@ class ConfigError(ValueError):
 
 
 def load_config(path, **overrides):
-    """Read a YAML config, apply overrides (e.g. root=...), check it, return a dict."""
+    """Read a YAML config, apply overrides (e.g. root=...), check it, return a dict.
+
+    If the env var DISKCTX_LOCAL_ROOT is set (e.g. ~/diskctx_data), root and local_dir
+    become <it>/root and <it>/local, so local data lives outside the repo. Otherwise the
+    config's paths are used. Explicit overrides (the notebook's Drive ROOT) win over both.
+    """
     with open(path) as f:
         cfg = yaml.safe_load(f)
+    local_root = os.environ.get(LOCAL_ROOT_ENV)
+    if local_root:
+        base = Path(local_root).expanduser()
+        cfg["root"] = str(base / "root")
+        cfg["local_dir"] = str(base / "local")
     cfg.update(overrides)
     check_config(cfg)
     return cfg

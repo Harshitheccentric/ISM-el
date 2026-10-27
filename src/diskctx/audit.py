@@ -140,7 +140,6 @@ def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source):
 def audit_stages(cfg, sources, fetch=None, keep_zips=False):
     """One pass-1 stage per quarter that has a zip. Hashed on its quarter, URL and the
     column config, so extending the range only adds stages."""
-    kwargs = {"fetch": fetch} if fetch else {}
     stages = []
     for row in sources:
         quarter, url = row["quarter"], row["url"]
@@ -150,7 +149,7 @@ def audit_stages(cfg, sources, fetch=None, keep_zips=False):
 
         def build(work, storage, quarter=quarter, url=url, out=out):
             check_budget(storage, quarter, cfg["budget"])
-            zip_path = local_zip(storage, url, **kwargs)
+            zip_path = local_zip(storage, url, fetch)
             largest = audit_quarter(zip_path, work / out, work, cfg["smart_ids"], quarter,
                                     storage.data_source)
             log_download(storage, quarter, zip_path.stat().st_size, largest, None)

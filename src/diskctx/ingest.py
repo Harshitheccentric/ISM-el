@@ -154,7 +154,6 @@ def ingest_stages(cfg, sources, models, quarters, fetch=None, keep_zips=False):
     The hash covers the resolved model list, the quarter, its URL and the column config,
     not select's hash: extending the range reruns ingest only if the chosen models change.
     """
-    kwargs = {"fetch": fetch} if fetch else {}
     stages = []
     for row in sources:
         quarter, url = row["quarter"], row["url"]
@@ -164,7 +163,7 @@ def ingest_stages(cfg, sources, models, quarters, fetch=None, keep_zips=False):
 
         def build(work, storage, quarter=quarter, url=url, out=out):
             check_budget(storage, quarter, cfg["budget"])
-            zip_path = local_zip(storage, url, **kwargs)
+            zip_path = local_zip(storage, url, fetch)
             largest = ingest_quarter(zip_path, work / out, work, cfg["smart_ids"], models,
                                      storage.data_source)
             log_download(storage, quarter, zip_path.stat().st_size, largest, (work / out).stat().st_size)

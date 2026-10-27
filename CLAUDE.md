@@ -35,7 +35,8 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
 - A column missing from a quarter becomes null, never an error.
 - Boot drives (e.g. `DELLBOSS VD`). Row rule: drop a row with no SMART values at all.
   Model rule: a model is a boot model if ≥95% of its rows have no SMART values, or ≥95%
-  of its rows have an empty slot in files where the slot column is populated. Boot
+  of its rows have an empty slot in files that "have slots" (≥1 row with a non-empty
+  slot; a slot column that is empty everywhere counts as an old file). Boot
   models are dropped in every quarter (`audit/boot_models.csv`). Never drop single rows
   for an empty slot (pod fields may roll out gradually).
 - Count TRY_CAST failures (non-empty → NULL) and duplicate (serial, date) rows in the audit.
@@ -61,7 +62,11 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
 
 ## Notebook / Colab
 - One ROOT. On Colab it is a Drive folder (mount guarded by `try: import google.colab`);
-  locally it is any folder.
+  locally it is outside the repo: `DISKCTX_LOCAL_ROOT` (e.g. `~/diskctx_data`) gives
+  `<it>/root` and `<it>/local`; fallback = the config paths. Marker paths are relative
+  to ROOT, so a durable folder copied to Drive keeps its finished stages.
+- CLI (resumable, prints the status table): `python -m diskctx run --config
+  configs/full.yaml --stages sources,audit` and `python -m diskctx status --config ...`.
 - Stage pattern: work on local disk → copy to ROOT → verify → write done-marker LAST
   (config hash + timestamp). Skip only if marker exists and hash matches.
 - Two artifact tiers: durable (copied to ROOT: audit tables, filtered Parquet, splits,

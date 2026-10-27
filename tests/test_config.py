@@ -21,6 +21,21 @@ def test_repo_configs_load(mode):
     assert cfg["data_source"] == "backblaze"
 
 
+def test_local_root_env_var_moves_data_out_of_the_repo(tmp_path, monkeypatch):
+    monkeypatch.delenv("DISKCTX_LOCAL_ROOT", raising=False)
+    cfg = load_config(CONFIGS / "smoke.yaml")
+    assert (cfg["root"], cfg["local_dir"]) == ("data/root", "data/local")      # config fallback
+
+    monkeypatch.setenv("DISKCTX_LOCAL_ROOT", str(tmp_path / "diskctx_data"))
+    cfg = load_config(CONFIGS / "smoke.yaml")
+    assert cfg["root"] == str(tmp_path / "diskctx_data" / "root")
+    assert cfg["local_dir"] == str(tmp_path / "diskctx_data" / "local")
+
+    cfg = load_config(CONFIGS / "smoke.yaml", root="/content/drive/x")         # override wins
+    assert cfg["root"] == "/content/drive/x"
+    assert config_hash(cfg) == config_hash(load_config(CONFIGS / "smoke.yaml"))
+
+
 def test_full_config_covers_2016_to_2026():
     cfg = load_config(CONFIGS / "full.yaml")
     quarters = quarters_between(cfg["start_quarter"], cfg["end_quarter"])

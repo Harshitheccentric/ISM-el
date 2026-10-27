@@ -196,7 +196,11 @@ class Storage:
     def run_stages(self, stages, cfg):
         """Run stages in order with their effective hashes. Returns {name: result}."""
         hashes = stage_hashes(stages, cfg)
-        return {stage.name: self.run_stage(stage, hashes[stage.name]) for stage in stages}
+        results = {}
+        for stage in stages:
+            results[stage.name] = self.run_stage(stage, hashes[stage.name])
+            print(f"{stage.name}: {results[stage.name]}", flush=True)
+        return results
 
 
 def sha256_file(path):

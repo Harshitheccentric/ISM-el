@@ -83,13 +83,14 @@ def resolve_sources(quarters, listed, head=head_ok):
     return rows
 
 
-def sources_stage(cfg, head=head_ok, doc_path=DOC_PATH):
-    """The sources stage. Reruns when the range or the listed URLs change."""
+def sources_stage(cfg, head=None, doc_path=DOC_PATH):
+    """The sources stage. Reruns when the range or the listed URLs change.
+    head: HEAD check for derived URLs (default: head_ok)."""
     listed = listed_urls(doc_path)
     quarters = quarters_between(cfg["start_quarter"], cfg["end_quarter"])
 
     def build(work, storage):
-        rows = resolve_sources(quarters, listed, head)
+        rows = resolve_sources(quarters, listed, head or head_ok)
         out = work / SOURCES_FILE
         out.parent.mkdir(parents=True)
         with open(out, "w", newline="") as f:
@@ -124,9 +125,10 @@ def download(url, dest):
     part.replace(dest)
 
 
-def local_zip(storage, url, fetch=download):
-    """The quarter zip on local disk: reused if a complete copy is there, else fetched."""
+def local_zip(storage, url, fetch=None):
+    """The quarter zip on local disk: reused if a complete copy is there, else fetched
+    with fetch(url, dest) (default: download)."""
     dest = storage.download_dir / url.rsplit("/", 1)[1]
     if not dest.exists():
-        fetch(url, dest)
+        (fetch or download)(url, dest)
     return dest
