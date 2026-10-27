@@ -1,0 +1,9 @@
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q2_2026.zip
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q1_2026.zip
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q4_2025.zip
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q3_2025.zip
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q2_2025.zip
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q1_2025.zip
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q4_2024.zip
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q3_2024.zip
+https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q2_2024.zip

@@ -1,0 +1,17 @@
+# data and large artifacts (never commit)
+data/
+*.zip
+*.parquet
+!tests/fixtures/*.parquet
+
+# notebooks
+.ipynb_checkpoints/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
