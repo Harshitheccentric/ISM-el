@@ -56,7 +56,8 @@ class Stage:
     tier:    DURABLE or CACHE.
     outputs: file or folder names, relative to the tier folder.
     build:   build(work_dir, storage) writes every output into work_dir. It reads its
-             inputs from storage.path(...).
+             inputs from storage.path(...). It may return a small dict of facts about
+             the build; it is stored in the marker as "info".
     keys:    config keys this stage depends on (None = the whole config).
     deps:    names of upstream stages whose outputs it reads.
     params:  values that belong to this stage only and are hashed with its keys, e.g.
@@ -125,7 +126,7 @@ class Storage:
             return None
         return json.loads(p.read_text())
 
-    def write_marker(self, stage, cfg_hash):
+    def write_marker(self, stage, cfg_hash, info=None):
         marker = {
             "stage": stage.name,
             "tier": stage.tier,
@@ -133,6 +134,7 @@ class Storage:
             "data_source": self.data_source,
             "outputs": list(stage.outputs),
             "files": self.manifest(stage),
+            "info": info or {},
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         p = self.marker_path(stage.name)
@@ -180,7 +182,7 @@ class Storage:
         work = self.work_dir / stage.name
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
-        stage.build(work, self)
+        info = stage.build(work, self)
 
         for out in stage.outputs:
             src = work / out
@@ -190,7 +192,7 @@ class Storage:
             copy_and_verify(src, dest)
 
         shutil.rmtree(work)
-        self.write_marker(stage, cfg_hash)
+        self.write_marker(stage, cfg_hash, info)
         return "rebuilt" if state in ("missing", "mismatch") else "built"
 
     def run_stages(self, stages, cfg):

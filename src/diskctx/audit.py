@@ -192,7 +192,7 @@ def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source, b
                   prev_state=None):
     """Audit every day CSV of one quarter zip, one day at a time, and write the quarter
     tables into out_dir. prev_state: the previous quarter's end_state.parquet (may not
-    exist). Returns the largest day CSV's bytes."""
+    exist). Returns (largest day CSV's bytes, whether the previous end state was used)."""
     missing = [i for i in POD_DAY_SMART if i not in smart_ids]
     if missing:
         raise ValueError(f"smart_ids must include {missing} for the pod-day table")
@@ -267,12 +267,16 @@ def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source, b
         writer.writerow(["quarter", "check", "column", "count", "data_source"])
         for (check, col), n in quality.items():
             writer.writerow([quarter, check, col, n, data_source])
-    return largest
+    return largest, found
 
 
 def audit_stages(cfg, sources, fetch=None, keep_zips=False):
     """One pass-1 stage per quarter that has a zip. Hashed on AUDIT_VERSION, its quarter,
-    URL, boot_share and the column config, so extending the range only adds stages."""
+    URL, boot_share and the column config, so extending the range only adds stages.
+
+    Stages come in source order, which is chronological, and run one after another, so
+    on a fresh run each quarter finds the previous quarter's end state. The marker's
+    info records whether it was used for day 1 (carried_state_day1)."""
     stages = []
     for row in sources:
         quarter, url = row["quarter"], row["url"]
@@ -283,12 +287,14 @@ def audit_stages(cfg, sources, fetch=None, keep_zips=False):
         def build(work, storage, quarter=quarter, url=url, out=out):
             check_budget(storage, quarter, cfg["budget"])
             zip_path = local_zip(storage, url, fetch)
-            prev = storage.path(DURABLE, f"audit/quarters/{previous_quarter(quarter)}/end_state.parquet")
-            largest = audit_quarter(zip_path, work / out, work, cfg["smart_ids"], quarter,
-                                    storage.data_source, cfg["selection"]["boot_share"], prev)
+            prev_quarter = previous_quarter(quarter)
+            prev = storage.path(DURABLE, f"audit/quarters/{prev_quarter}/end_state.parquet")
+            largest, carried = audit_quarter(zip_path, work / out, work, cfg["smart_ids"], quarter,
+                                             storage.data_source, cfg["selection"]["boot_share"], prev)
             log_download(storage, quarter, zip_path.stat().st_size, largest, None)
             if not keep_zips:
                 zip_path.unlink()
+            return {"carried_state_day1": carried, "previous_quarter": prev_quarter}
 
         stages.append(Stage(
             name=f"audit_{quarter}",

@@ -328,8 +328,14 @@ def test_quarter_boundary_delta_uses_carried_state(cfg, zip_fetch):
             "2026-01-02": [lba_row("2026-01-02", "D1", "SYNTH LBA", base + 2 * gb2)]}),
     }
     cfg.update(start_quarter="2025Q4", end_quarter="2026Q1")
-    run_data(cfg, fetch=zip_fetch(zips))
+    results = run_data(cfg, fetch=zip_fetch(zips))
     storage = Storage.from_config(cfg)
+    audits = [name for name in results if name.startswith("audit_")]
+    assert audits == ["audit_2025Q4", "audit_2026Q1"]                 # chronological order
+    assert storage.read_marker("audit_2025Q4")["info"] == {"carried_state_day1": False,
+                                                            "previous_quarter": "2025Q3"}
+    assert storage.read_marker("audit_2026Q1")["info"] == {"carried_state_day1": True,
+                                                            "previous_quarter": "2025Q4"}
 
     state = parquet_rows(storage, "audit/quarters/2025Q4/end_state.parquet")
     assert [(s["serial"], str(s["last_date"]), s["smart_241_raw"]) for s in state] == [("D1", "2025-12-31", base)]
@@ -352,6 +358,7 @@ def test_missing_previous_state_gives_null_not_error(cfg, zip_fetch):
     assert q1["2026-01-02"]["tb_written_mean"] == pytest.approx(1.024)
     quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, "audit/quarters/2026Q1/quality.csv")}
     assert quality[("previous_end_state", "found")] == 0
+    assert storage.read_marker("audit_2026Q1")["info"]["carried_state_day1"] is False
 
 
 def test_counter_reset_gives_null_and_is_counted(cfg, zip_fetch):

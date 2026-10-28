@@ -198,7 +198,10 @@
   the full run.
 - The carried end state is read when a quarter runs; it is not in the stage hash. If an
   earlier quarter is re-audited later, the next quarter's day-1 deltas are not redone
-  automatically (rerun it by deleting its marker).
+  automatically (rerun it by deleting its marker). Pass 1 runs quarters in
+  chronological order, so a fresh run carries state into every quarter after the first
+  one. Each audit marker records `info.carried_state_day1` (true/false) and
+  `info.previous_quarter` (tested).
 - Will at least 2 exact model strings have ≥100 failures in the window, with enough in
   test for usable CIs? 2026Q1 alone gives 1, so this needs a multi-quarter audit.
 - Several high-failure models lack 241/242 (MG08ACA16TA, HUH721212ALN604,
