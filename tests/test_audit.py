@@ -5,10 +5,14 @@ import csv
 import json
 from datetime import date
 
+import pyarrow.parquet as pq
+import pytest
 from conftest import csv_text
 
+import diskctx.audit as audit
 from diskctx.audit import read_csv_rows, read_selection, select_models, selection_warning, swn_window
 from diskctx.pipeline import run_data
+from diskctx.storage import stage_hashes
 from diskctx.status import status_report
 from diskctx.storage import DURABLE, Storage
 from diskctx.synthetic import COLUMNS, MODEL_BOOT, MODEL_LBA, MODEL_NO_LBA, SyntheticFleet
@@ -89,7 +93,12 @@ def test_audit_matches_hand_counts(cfg, fleet_fetch):
     summary = by_model(rows_of(storage, "audit/summary.csv"))
     assert summary[MODEL_NO_LBA]["reason"] == "241/242 coverage below 95% in every quarter"
     assert [r["model"] for r in rows_of(storage, "audit/boot_models.csv")] == [MODEL_BOOT]
-    assert {r["count"] for r in rows_of(storage, "audit/quality.csv")} == {0}
+    quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, "audit/quality.csv")}
+    planned_resets = sum(d.reset_day is not None for d in lba)       # one per reset drive
+    assert quality.pop(("counter_reset", "smart_241_raw")) == planned_resets == 2
+    assert quality.pop(("counter_reset", "smart_242_raw")) == planned_resets
+    assert quality.pop(("previous_end_state", "found")) == 0
+    assert set(quality.values()) == {0}
 
 
 def test_pod_coverage_first_date(cfg, zip_fetch):
@@ -114,7 +123,7 @@ def test_pod_coverage_first_date(cfg, zip_fetch):
     assert s["swn_failures"] == 2                      # both failures are in 2026Q1
     assert s["pod_failures"] == 1                      # only the Jan 8 failure is after Jan 4
     assert float(s["pod_coverage"]) == 1.0
-    assert float(s["share_pod"]) == round((18 + 18 + 17 + 131) / 190, 4)
+    assert float(s["share_pod_key"]) == round((18 + 18 + 17 + 131) / 190, 4)
     assert s["pod_ok"] == "True" and s["selected"] == "True"
 
 
@@ -237,6 +246,131 @@ def test_summary_csv_is_readable(cfg, fleet_fetch):
     run_data(cfg, fetch=fleet_fetch(SyntheticFleet(cfg["seed"], "2026Q1", "2026Q1")))
     with open(Storage.from_config(cfg).path(DURABLE, "audit/summary.csv"), newline="") as f:
         header = next(csv.reader(f))
-    for col in ("model", "boot", "drives_max_quarter", "share_smart_241_raw", "share_pod",
+    for col in ("model", "boot", "drives_max_quarter", "share_smart_241_raw", "share_pod_key",
                 "swn_window", "pod_from", "pod_ok", "selected", "reason"):
         assert col in header
+
+
+# --- failure events, pod-day table, counter deltas -------------------------------------
+
+
+def parquet_rows(storage, name):
+    return pq.read_table(storage.path(DURABLE, name)).to_pylist()
+
+
+def lba_row(day, serial, model, written, read=1_000_000_000, temp="30", vault="1154", **kw):
+    row = make_row(day, serial, model, **kw)
+    row.update(smart_241_raw=str(written), smart_242_raw=str(read), smart_194_raw=temp, vault_id=vault)
+    return row
+
+
+def test_failure_row_without_smart_is_kept_as_event(cfg, zip_fetch):
+    day1, day2 = "2026-01-01", "2026-01-02"
+    rows = {
+        day1: [make_row(day1, "F1", "SYNTH X", slot="0001"), make_row(day1, "F2", "SYNTH X", slot="0002")],
+        # F1 fails with every SMART field empty (dead drive); F2 fails normally
+        day2: [make_row(day2, "F1", "SYNTH X", slot="0001", smart=False, failure="1"),
+               make_row(day2, "F2", "SYNTH X", slot="0002", failure="1")],
+    }
+    storage = run_crafted(cfg, zip_fetch, rows)
+
+    events = parquet_rows(storage, "audit/quarters/2026Q1/events.parquet")
+    assert [(e["serial_number"], e["had_smart"], e["pod_key"], e["vault_key"]) for e in events] == [
+        ("F1", False, "sac0|000|1154|02", "sac0|000|1154"), ("F2", True, "sac0|000|1154|02", "sac0|000|1154")]
+    x = by_model(rows_of(storage, "audit/quarters/2026Q1/models.csv"))["SYNTH X"]
+    assert (x["failures"], x["failed_drives"], x["rows_no_smart"], x["rows"]) == (2, 2, 1, 3)
+    assert by_model(rows_of(storage, "audit/summary.csv"))["SYNTH X"]["swn_failures"] == 2
+
+
+def test_pod_days_cover_all_non_boot_models(cfg, zip_fetch):
+    day = "2026-01-01"
+    rows = [
+        lba_row(day, "S1", "SYNTH SEL", 1, temp="30", slot="0001", failure="1"),
+        lba_row(day, "S2", "SYNTH SEL", 1, temp="40", slot="0002"),
+        make_row(day, "O1", "SYNTH OTHER", slot="0003", failure="1"),             # no 241/242
+        make_row(day, "O2", "SYNTH OTHER", slot="0004", smart=False, failure="1"),
+        make_row(day, "B1", "SYNTH BOOT VD", slot="", smart=False),               # boot model
+        make_row(day, "B2", "SYNTH BOOT VD", slot="", smart=False),
+        lba_row(day, "S3", "SYNTH SEL", 1, temp="35", slot="0001", vault="2017"),  # same pod_id, other vault
+    ]
+    rows[2].update(smart_194_raw="50", smart_241_raw="", smart_242_raw="")
+    storage = run_crafted(cfg, zip_fetch, {day: rows})
+    assert [m["model"] for m in read_selection(storage)["models"]] == ["SYNTH SEL"]
+
+    pods = {p["pod_key"]: p for p in parquet_rows(storage, "audit/quarters/2026Q1/pod_days.parquet")}
+    assert sorted(pods) == ["sac0|000|1154|02", "sac0|000|2017|02"]
+    p = pods["sac0|000|1154|02"]
+    assert p["vault_key"] == "sac0|000|1154"
+    assert (p["drives"], p["drives_lba"]) == (4, 2)          # SEL + OTHER, boot drives left out
+    assert p["temp_mean"] == pytest.approx((30 + 40 + 50) / 3) and p["temp_max"] == 50
+    assert p["failures"] == 3                                 # S1, O1 and O2 (no SMART)
+    assert p["tb_written_mean"] is None                       # no yesterday to compare with
+    assert pods["sac0|000|2017|02"]["drives"] == 1
+
+
+def crafted_zip(quarter, days_rows):
+    year, q = quarter.split("Q")
+    return {f"data_Q{q}_{year}/{day}.csv": csv_text(rows) for day, rows in days_rows.items()}
+
+
+def tb_by_day(storage, quarter):
+    rows = parquet_rows(storage, f"audit/quarters/{quarter}/pod_days.parquet")
+    return {str(r["date"]): r for r in rows}
+
+
+def test_quarter_boundary_delta_uses_carried_state(cfg, zip_fetch):
+    gb2 = 2_000_000_000                      # LBAs per day -> 2e9 x 512 B = 1.024 TB
+    base = 10_000_000_000
+    zips = {
+        "2025Q4": crafted_zip("2025Q4", {"2025-12-31": [lba_row("2025-12-31", "D1", "SYNTH LBA", base)]}),
+        "2026Q1": crafted_zip("2026Q1", {
+            "2026-01-01": [lba_row("2026-01-01", "D1", "SYNTH LBA", base + gb2)],
+            "2026-01-02": [lba_row("2026-01-02", "D1", "SYNTH LBA", base + 2 * gb2)]}),
+    }
+    cfg.update(start_quarter="2025Q4", end_quarter="2026Q1")
+    run_data(cfg, fetch=zip_fetch(zips))
+    storage = Storage.from_config(cfg)
+
+    state = parquet_rows(storage, "audit/quarters/2025Q4/end_state.parquet")
+    assert [(s["serial"], str(s["last_date"]), s["smart_241_raw"]) for s in state] == [("D1", "2025-12-31", base)]
+    q1 = tb_by_day(storage, "2026Q1")
+    assert q1["2026-01-01"]["tb_written_mean"] == pytest.approx(gb2 * 512 / 1e12)   # from the carried state
+    assert q1["2026-01-02"]["tb_written_mean"] == pytest.approx(1.024)
+    assert q1["2026-01-01"]["tb_read_mean"] == 0.0
+    quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, "audit/quarters/2026Q1/quality.csv")}
+    assert quality[("previous_end_state", "found")] == 1
+
+
+def test_missing_previous_state_gives_null_not_error(cfg, zip_fetch):
+    zips = {"2026Q1": crafted_zip("2026Q1", {
+        "2026-01-01": [lba_row("2026-01-01", "D1", "SYNTH LBA", 10_000_000_000)],
+        "2026-01-02": [lba_row("2026-01-02", "D1", "SYNTH LBA", 12_000_000_000)]})}
+    run_data(cfg, fetch=zip_fetch(zips))
+    storage = Storage.from_config(cfg)
+    q1 = tb_by_day(storage, "2026Q1")
+    assert q1["2026-01-01"]["tb_written_mean"] is None
+    assert q1["2026-01-02"]["tb_written_mean"] == pytest.approx(1.024)
+    quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, "audit/quarters/2026Q1/quality.csv")}
+    assert quality[("previous_end_state", "found")] == 0
+
+
+def test_counter_reset_gives_null_and_is_counted(cfg, zip_fetch):
+    days = {"2026-01-01": 5_000_000_000, "2026-01-02": 1_000_000, "2026-01-03": 2_000_000}
+    rows = {d: [lba_row(d, "R1", "SYNTH LBA", w, read=1_000_000_000 + i)] for i, (d, w) in enumerate(days.items())}
+    run_data(cfg, fetch=zip_fetch({"2026Q1": crafted_zip("2026Q1", rows)}))
+    storage = Storage.from_config(cfg)
+    q1 = tb_by_day(storage, "2026Q1")
+    assert q1["2026-01-02"]["tb_written_mean"] is None                 # 1e6 < 5e9: reset
+    assert q1["2026-01-02"]["resets_written"] == 1
+    assert q1["2026-01-02"]["tb_read_mean"] == pytest.approx(512 / 1e12)  # read kept rising
+    assert q1["2026-01-03"]["tb_written_mean"] == pytest.approx(1_000_000 * 512 / 1e12)
+    quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, "audit/quarters/2026Q1/quality.csv")}
+    assert quality[("counter_reset", "smart_241_raw")] == 1
+    assert quality[("counter_reset", "smart_242_raw")] == 0
+
+
+def test_audit_version_is_in_the_stage_hash(cfg, monkeypatch):
+    sources = [{"quarter": "2026Q1", "url": "https://x/data_Q1_2026.zip", "kind": "listed"}]
+    before = stage_hashes(audit.audit_stages(cfg, sources), cfg)["audit_2026Q1"]
+    monkeypatch.setattr(audit, "AUDIT_VERSION", audit.AUDIT_VERSION + 1)
+    assert stage_hashes(audit.audit_stages(cfg, sources), cfg)["audit_2026Q1"] != before

@@ -88,11 +88,66 @@
   - **Failure days:** 668 of the 998 non-boot failures (67%) have an empty slot on their
     failure day; ST12000NM0008 has 77 of its 125. The slot is probably cleared when a
     drive is pulled, so "slot is null" on day t leaks the label (see M4 requirements).
+    (Counted before the audit v2 fix. With all failure events the total is 1,030.)
+- **Failure-count check, 2026Q1 raw CSVs (2026-10-27, read-only).** 30,597,484 rows;
+  the failure column holds only `0`/`1`. There are 1,030 failure rows from 1,030
+  distinct drives, all with a pod_key. The audit v1 no-SMART row rule dropped 32 of
+  them (all Seagate: ST24000NM002H 19, ST12000NM0008 4, ST8000DM002 3, ST8000NM0055 3,
+  ST14000NM0138 / ST16000NM001G / ST16000NM000J 1 each). The boot-model rule, casts and
+  duplicates dropped none. All 32 drives appear on earlier days, and 29 report SMART
+  before failing. The first full pass 1 was stopped and is redone with audit v2.
+- **Audit v2 (2026-10-27).** `AUDIT_VERSION = 2` is in each audit stage's hash, so
+  finished quarters rerun. Pass 1 now also captures, from all drives:
+  - `events.parquet`: failure events before any cleaning (serial, model, date, pod_key,
+    vault_key, had_smart). The audit's failure counts and the selection use these.
+  - `pod_days.parquet`: per pod per day over all non-boot drives (quarter-local boot
+    rule): drives, drives with 241/242, mean/max SMART 194, mean/max daily TB
+    written/read, resets, failures from the events, vault_key.
+  - `end_state.parquet`: per drive seen on the last day, its 241/242 counters. The next
+    quarter's day 1 delta uses it. If it is missing, the delta is null (not an error) and
+    quality.csv records `previous_end_state found 0`. A negative delta is a reset: null,
+    and counted (quality.csv `counter_reset`, pod_days `resets_*`).
+  - P coverage and the P window use `pod_key_rows` (pod_key non-null). The slot is only
+    a position feature.
+  - The synthetic generator's fill-phase counter was not cumulative (it dropped after
+    20 days); it is fixed, and counters now fall only at a planned reset.
+  - New tests: a failure row with empty SMART is kept as an event; pod_days include
+    non-selected models and leave out boot models; the quarter-boundary delta uses the
+    carried state; a missing previous state gives null; a reset gives null and is
+    counted; AUDIT_VERSION is in the hash. Full `pytest -q` 112 passed.
+  - **Real 2026Q1 pass 1 (zip reused, no download):** 179 s wall time, 1.1 GB peak RAM.
+    Failures 1,030 (32 without SMART). ST12000NM0008 129, MG08ACA16TA 102,
+    HUH721212ALN604 95, MG07ACA14TA 94, HUH721212ALE604 86, ST24000NM002H 74.
+    Selection unchanged: ST12000NM0008 (129 failures, pod_coverage 1.0).
+    `pod_days.parquet` has 532,424 rows (6,079 pods, 304 vaults) and is 11.9 MB;
+    `end_state.parquet` 345,224 rows, 2.7 MB; `events.parquet` 16 KB; the whole quarter
+    folder is about 15 MB. Counter resets: 9 for 241, 10 for 242. Previous state not
+    found (2025Q4 not audited locally), so Jan 1 deltas are null.
+- **Missingness-leak check, 2026Q1** (read-only, non-boot models; null rate in %; a
+  check of the data, not a feature). 1,030 failing drives; 5,909 rows in f-7..f-1.
+
+  | column | healthy (all days) | failing f-30..f-8 | failing f-7..f-1 | failing day f |
+  |---|---|---|---|---|
+  | datacenter / cluster / vault / pod_id | 0 | 0 | 0 | 0 |
+  | capacity_bytes, failure | 0 | 0 | 0 | 0 |
+  | **pod_slot_num** | 0.068 | 7.217 | 12.405 | 67.864 |
+  | **smart_5 / 9 / 194 / 198** | 0.001 | 1.126 | 2.132 | 3.107 |
+  | **smart_197** | 1.731 | 4.248 | 5.517 | 6.117 |
+  | smart_187 | 66.787 | 63.832 | 64.173 | 63.689 |
+  | smart_188 | 66.666 | 63.376 | 63.378 | 62.913 |
+  | smart_241 / 242 | 55.919 | 52.474 | 51.667 | 52.233 |
+
+  Flagged (missingness rises before failure): `pod_slot_num` (from weeks before),
+  SMART 5/9/194/198 (whole rows go silent before failure: the no-SMART days), and
+  SMART 197 (part may be model mix). 187/188/241/242 are *lower* for failing drives;
+  that is model mix (whole models lack them), not a leak. A per-model version belongs
+  in M4.
 
 ## Next
-- **M3** — labels and splits (requirements below). Run the full pass 1 first:
+- **Restart the full pass 1** with audit v2 (after merging this branch into main):
   `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m diskctx run --config configs/full.yaml
-  --stages sources,audit,select`. One quarter gives only one model with ≥100 failures.
+  --stages sources,audit,select`. The 8 finished v1 quarters rerun automatically.
+- **M3** — labels and splits (requirements below).
 
 ## M2 requirements (decided 2026-10-27)
 - Full 2016–2026 range must run on free Colab; never shrink the range to fit Drive.
@@ -114,23 +169,36 @@
   for an empty slot. Boot models → `audit/boot_models.csv`.
 - `min_coverage` stays 0.95 for now (Harsh, 2026-10-27).
 
-## M4 requirements (proposed 2026-10-27, needs Harsh's OK)
-- Slot / pod features must not use day t's slot: an empty slot on the failure day
-  (67% of 2026Q1 failures) leaks the label. Use the last non-empty slot seen on a day
-  ≤ t-1, and never use "slot is null" as a feature. Add a leakage test.
-
 ## M3 requirements (decided 2026-10-27)
 - `horizons` is a config key of the labels stage. Changing it must rerun labels and every
   stage downstream of it (features, models, results, experiments). Add a dependency test
   for this once the labels stage exists.
+- Failure dates come only from the failure events (`audit/quarters/*/events.parquet`,
+  built before any cleaning). Cleaning may remove a row's features, never the event.
+- The failure-day row is the event, not a sample. Samples are drive-days t strictly
+  before the failure date. The failure-day row gets no label and is excluded from
+  train, val and test. Add a test.
+- Daily TB deltas across quarters use the carried end state (see audit v2). M4 features
+  for the selected models need the same rule over the pass-2 Parquet.
+
+## M4 requirements (decided 2026-10-27)
+- Slot: use the last slot seen on a day ≤ t-1. Never use slot missingness as a feature.
+  Pod coverage and the P window use pod_key; the slot is only a position feature.
+- Every column flagged by the missingness-leak check (pod_slot_num, SMART 5/9/194/198,
+  197) must also use the last value seen on a day ≤ t-1. Add a leakage test.
+- Pod features come from `pod_days.parquet` (whole pod, all non-boot models), lagged to
+  ≤ t-1; pod failure counts exclude the drive itself.
 
 ## Open questions
 - When do pod/vault/slot fields start being populated? HANDOFF conflicts
   (Q2 2023 vs 2026 Q1). 2026Q1 has them (≥95% for every non-boot model from day 1);
   A full pass 1 answers this for earlier quarters, and the split window is set after it.
-- Pod coverage counts the slot. Because only the slot is ever missing and it is missing
-  around failures and installs, should P coverage use `pod_key` alone (always complete
-  in 2026Q1)? Not changed yet.
+- Durable pass-1 size for the full range: about 15 MB per quarter with pod fields
+  (mostly pod_days). Older quarters without pod fields will be smaller. Check this on
+  the full run.
+- The carried end state is read when a quarter runs; it is not in the stage hash. If an
+  earlier quarter is re-audited later, the next quarter's day-1 deltas are not redone
+  automatically (rerun it by deleting its marker).
 - Will at least 2 exact model strings have ≥100 failures in the window, with enough in
   test for usable CIs? 2026Q1 alone gives 1, so this needs a multi-quarter audit.
 - Several high-failure models lack 241/242 (MG08ACA16TA, HUH721212ALN604,

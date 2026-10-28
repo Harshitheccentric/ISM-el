@@ -12,7 +12,8 @@ Reading a day (shared with the audit):
   is dropped. Whole boot *models* are found by the audit (see audit.py) and are never
   selected, so pass 2 never writes them.
 - pod_key = datacenter|cluster_id|vault_id|pod_id (pod_id alone is not unique);
-  NULL if any part is missing.
+  NULL if any part is missing. The day view also has vault_key = datacenter|cluster_id|
+  vault_id (used by the audit's pod-day table; not written to the Parquet).
 """
 
 import csv
@@ -102,10 +103,11 @@ def load_day(con, csv_path, smart_ids):
         return q(col)
 
     pod_key = " || '|' || ".join(typed(c) for c in POD_FIELDS)  # NULL if any part is NULL
+    vault_key = " || '|' || ".join(typed(c) for c in POD_FIELDS[:3])
     con.execute(f"""
         CREATE OR REPLACE TEMP VIEW day AS
         SELECT {', '.join(f'{typed(c)} AS {q(c)}' for c in input_columns(smart_ids))},
-               {pod_key} AS pod_key, no_smart
+               {pod_key} AS pod_key, {vault_key} AS vault_key, no_smart
         FROM raw_day
     """)
     return present

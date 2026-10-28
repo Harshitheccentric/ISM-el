@@ -33,7 +33,11 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
 - Pod key = datacenter + cluster_id + vault_id + pod_id (pod_id alone is not unique).
 - SMART raw values are 64-bit ints (BIGINT, via TRY_CAST). Use raw values, not normalized.
 - A column missing from a quarter becomes null, never an error.
-- Boot drives (e.g. `DELLBOSS VD`). Row rule: drop a row with no SMART values at all.
+- Failure events come from the raw rows before any cleaning (`events.parquet` per
+  quarter). Cleaning removes a row's features, never its failure event. Failure counts,
+  selection and labels use only the events.
+- Boot drives (e.g. `DELLBOSS VD`). Row rule: a row with no SMART values at all loses
+  its features (its failure event is kept).
   Model rule: a model is a boot model if ≥95% of its rows have no SMART values, or ≥95%
   of its rows have an empty slot in files that "have slots" (≥1 row with a non-empty
   slot; a slot column that is empty everywhere counts as an old file). Boot
@@ -46,16 +50,26 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
   it one at a time with `zipfile` (match `*.csv`, skip `__MACOSX`/dot-files/nested
   junk); process each day, delete it; delete the zip at quarter end.
   Peak local disk = one zip + one day.
-- Two passes. Pass 1 audit: every quarter in start_quarter..end_quarter → tiny
-  per-model × per-quarter tables only. Pass 2 ingest: only quarters/models selected,
-  only needed columns (~20), boot drives dropped, zstd Parquet per quarter.
-  A config model allowlist may skip pass 1.
+- Two passes. Pass 1 audit: every quarter in start_quarter..end_quarter → small tables,
+  plus everything that needs all drives (failure events, pod-day aggregates over all
+  non-boot drives, 241/242 end state carried to the next quarter). Pass 2 ingest: only
+  quarters/models selected, only needed columns (~20), boot drives dropped, zstd
+  Parquet per quarter. A config model allowlist may skip pass 1. Bump `AUDIT_VERSION`
+  whenever pass-1 outputs change.
+- Daily TB = Δ241/Δ242 × 512 B vs yesterday's counter (carried across quarters). No
+  yesterday → null; negative delta = counter reset → null, counted.
+- Pod coverage / P window use pod_key. The slot is only a position feature, taken from
+  the last value seen ≤ t-1; slot missingness is never a feature.
 - Every artifact and results row carries `data_source` (`backblaze` | `synthetic`).
   Synthetic runs write under `ROOT/_synthetic/`; reporting code refuses them.
 
 ## Splits and leakage
 - Failed drives go to the split whose time window contains their failure date;
   never-failed drives are assigned by seeded hash. A serial appears in one split only.
+- The failure-day row is the event, not a sample: samples are days t strictly before
+  the failure date; the failure-day row is in no split.
+- Columns whose missingness rises before failure (slot, SMART 5/9/194/197/198) use the
+  last value seen ≤ t-1.
 - Purge gap of max(horizon) days at each window end.
 - Compute features on full drive history, then cut to the split window (warm-up).
 - Downsample healthy drives by drive, on train only.

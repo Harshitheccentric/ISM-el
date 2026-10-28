@@ -1,29 +1,54 @@
 """Pass 1 audit (per exact model string, per quarter) and model selection.
 
+Pass 1 reads every drive of every model, so it also captures what later stages need
+from the whole fleet (pass 2 keeps only the selected models).
+
 audit_<quarter> stage -> audit/quarters/<quarter>/
-  days.csv     per model per day: row counts, failures, non-null counts of each needed
-               SMART column and pod field, rows with a full pod location (pod_rows).
-  models.csv   per model: the same counts summed over the quarter, plus distinct drives
-               and distinct failed drives.
-  quality.csv  per column: values that were non-empty but became NULL after TRY_CAST;
-               and duplicate (serial_number, date) rows.
+  days.csv          per model per day: row counts, failures, non-null counts of each
+                    needed SMART column and pod field, rows with a pod_key
+                    (pod_key_rows) and with a pod_key and a slot (pod_rows).
+  models.csv        per model: the same counts summed over the quarter, plus distinct
+                    drives and distinct failed drives.
+  quality.csv       per column: values that were non-empty but became NULL after
+                    TRY_CAST; duplicate (serial_number, date) rows; 241/242 counter
+                    resets; whether the previous quarter's end state was found.
+  events.parquet    failure events: every failure=1 row of every model, taken BEFORE any
+                    cleaning (serial, model, date, pod_key, vault_key, had_smart). The
+                    no-SMART rule removes a row's features, never its failure event.
+                    days.csv failures count these same rows.
+  pod_days.parquet  per pod per day, over all non-boot drives (any model): drives,
+                    drives reporting 241/242, mean/max SMART 194, mean/max daily TB
+                    written/read, counter resets, failures that day (from the events).
+                    Keeps vault_key for vault-level counts. Empty if no pod fields.
+  end_state.parquet per drive seen on the quarter's last day: its 241/242 counters, so
+                    the next quarter's first day gets a daily delta.
+
+Daily TB = (counter today - counter yesterday) x 512 B / 1e12. The delta is null when the
+drive was not seen yesterday (including when the previous quarter's end state is
+missing) or a counter is null; a negative delta is a counter reset: null, and counted.
+The end state is read from the previous quarter's durable folder when the stage runs;
+it is not part of the stage hash.
+
+AUDIT_VERSION is in each audit stage's hash: bump it whenever the audit's outputs change,
+so finished quarters rerun automatically.
 
 Boot-drive rules (counted per model, never applied silently):
-  row rule    a row with no SMART values at all is dropped (rows_no_smart).
+  row rule    a row with no SMART values at all loses its features (rows_no_smart);
+              its failure event is kept.
   model rule  a model is a boot model if >= boot_share of its rows have no SMART values,
-              or >= boot_share of its rows have an empty slot, counted only in files where
-              the slot column is populated (at least one row has a slot). A file whose
-              slot column is absent or empty for every row predates the slot field and
-              says nothing about boot drives. Boot models are never selected.
+              or >= boot_share of its rows have an empty slot, counted only in files that
+              have slots (at least one row with a non-empty slot). A file whose slot
+              column is absent or empty for every row is treated like an old file. Boot
+              models are never selected; pod_days applies the rule within the quarter.
 
 select stage -> audit/selection.json, summary.csv, boot_models.csv, quality.csv
   S/W/N window: longest run of consecutive quarters where 241 and 242 are each non-null
                 on >= min_coverage of the model's rows (ties: the latest run).
-  P window:     from the first date with >= min_coverage pod coverage (all four pod key
-                fields and the slot non-null) to the end of the range.
+  P window:     from the first date with >= min_coverage pod_key coverage to the end of
+                the range. The slot is only a position feature, not part of coverage.
   A model is eligible if it is not a boot model and has >= min_failures failures inside
   its S/W/N window. pod_ok: >= min_failures failures and >= min_coverage pod coverage
-  inside its P window. Eligible models are ranked by (pod_ok, S/W/N failures), since pod
+  inside its P window. Failures come from the failure events. Eligible models are ranked by (pod_ok, S/W/N failures), since pod
   context is the core novelty; the top max_models are selected.
 """
 
@@ -32,14 +57,16 @@ import json
 
 import duckdb
 
-from diskctx.config import quarters_between
+from diskctx.config import previous_quarter, quarters_between
 from diskctx.ingest import POD_FIELDS, cast_types, load_day, q, smart_columns
 from diskctx.rawzip import day_members, extract_member
 from diskctx.sources import local_zip
 from diskctx.status import SELECTION_FILE, check_budget, log_download
 from diskctx.storage import DURABLE, Stage
 
-QUARTER_FILES = ("days.csv", "models.csv", "quality.csv")
+AUDIT_VERSION = 2   # 2: failure events before cleaning, pod_days, end_state, pod_key coverage
+LBA_BYTES = 512
+POD_DAY_SMART = (194, 241, 242)   # pod_days needs these in smart_ids
 SELECT_OUTPUTS = [SELECTION_FILE, "audit/summary.csv", "audit/boot_models.csv", "audit/quality.csv"]
 
 
@@ -50,7 +77,8 @@ def coverage_columns(smart_ids):
 def count_columns(smart_ids):
     """The per-model counts in days.csv / models.csv (all summable)."""
     return ["rows_total", "rows_no_smart", "rows_slot_file", "rows_empty_slot", "rows",
-            "failures", "pod_rows", *(f"nonnull_{c}" for c in coverage_columns(smart_ids))]
+            "failures", "pod_key_rows", "pod_rows",
+            *(f"nonnull_{c}" for c in coverage_columns(smart_ids))]
 
 
 # --- pass 1: one quarter ---------------------------------------------------------------
@@ -72,20 +100,27 @@ def audit_day(con, present, smart_ids, day, first):
                {slot_rows} AS rows_slot_file,
                {empty_slot} AS rows_empty_slot,
                count(*) FILTER (NOT no_smart) AS rows,
-               count(*) FILTER (NOT no_smart AND failure = 1) AS failures,
+               count(*) FILTER (failure = 1) AS failures,          -- all rows: = failure events
+               count(*) FILTER (NOT no_smart AND pod_key IS NOT NULL) AS pod_key_rows,
                count(*) FILTER (NOT no_smart AND pod_key IS NOT NULL AND pod_slot_num IS NOT NULL) AS pod_rows,
                {nonnull}
         FROM day GROUP BY ALL
     """
     con.execute(f"CREATE TABLE day_models AS {select}" if first else f"INSERT INTO day_models {select}")
     con.execute("""
-        INSERT INTO drives
-        SELECT coalesce(model, ''), serial_number, bool_or(coalesce(failure, 0) = 1)
-        FROM day WHERE NOT no_smart AND serial_number IS NOT NULL GROUP BY ALL
-        ON CONFLICT DO UPDATE SET failed = failed OR excluded.failed
+        INSERT INTO drives SELECT DISTINCT coalesce(model, ''), serial_number
+        FROM day WHERE NOT no_smart AND serial_number IS NOT NULL
+        ON CONFLICT DO NOTHING
     """)
+    # Failure events, before any cleaning: a failure row without SMART values is kept.
+    con.execute("""
+        INSERT INTO events
+        SELECT serial_number, coalesce(model, ''), date, pod_key, vault_key, NOT no_smart
+        FROM day WHERE failure = 1
+    """)
+    resets = pod_day_parts(con, day, first)
 
-    quality = {}
+    quality = {("counter_reset", "smart_241_raw"): resets[0], ("counter_reset", "smart_242_raw"): resets[1]}
     for col, sql_type in cast_types(smart_ids).items():
         if col in present:
             quality[("cast_failed", col)] = con.execute(
@@ -96,18 +131,88 @@ def audit_day(con, present, smart_ids, day, first):
     return quality
 
 
-def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source):
-    """Audit every day CSV of one quarter zip, one day at a time. Writes the three quarter
-    tables into out_dir. Returns the largest day CSV's bytes."""
+def pod_day_parts(con, day, first):
+    """Daily TB deltas against the carried counter state, partial pod sums per
+    (pod, model) for this day, then today's counters become the state.
+    Returns (241 resets, 242 resets) seen today."""
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE today AS
+        SELECT d.serial_number, coalesce(d.model, '') AS model, d.pod_key, d.vault_key,
+               d.smart_194_raw,
+               d.smart_241_raw IS NOT NULL AND d.smart_242_raw IS NOT NULL AS has_lba,
+               s.last_date = DATE '{day}' - 1 AS seen_yesterday,
+               d.smart_241_raw - s.smart_241_raw AS dw,
+               d.smart_242_raw - s.smart_242_raw AS dr
+        FROM day d LEFT JOIN state s ON s.serial = d.serial_number
+    """)
+    tb = f"* {LBA_BYTES} / 1e12"
+    parts = f"""
+        SELECT DATE '{day}' AS date, pod_key, vault_key, model,
+               count(*) AS drives,
+               count(*) FILTER (has_lba) AS drives_lba,
+               sum(smart_194_raw) AS temp_sum, count(smart_194_raw) AS temp_n,
+               max(smart_194_raw) AS temp_max,
+               sum(tbw) AS tbw_sum, count(tbw) AS tbw_n, max(tbw) AS tbw_max,
+               sum(tbr) AS tbr_sum, count(tbr) AS tbr_n, max(tbr) AS tbr_max,
+               count(*) FILTER (reset_w) AS resets_written,
+               count(*) FILTER (reset_r) AS resets_read
+        FROM (SELECT *,
+                     CASE WHEN seen_yesterday AND dw >= 0 THEN dw {tb} END AS tbw,
+                     CASE WHEN seen_yesterday AND dr >= 0 THEN dr {tb} END AS tbr,
+                     coalesce(seen_yesterday AND dw < 0, false) AS reset_w,
+                     coalesce(seen_yesterday AND dr < 0, false) AS reset_r
+              FROM today)
+        WHERE pod_key IS NOT NULL
+        GROUP BY ALL
+    """
+    con.execute(f"CREATE TABLE pod_parts AS {parts}" if first else f"INSERT INTO pod_parts {parts}")
+    resets = con.execute("""
+        SELECT count(*) FILTER (seen_yesterday AND dw < 0), count(*) FILTER (seen_yesterday AND dr < 0)
+        FROM today""").fetchone()
+    con.execute(f"""
+        INSERT INTO state
+        SELECT serial_number, DATE '{day}', max(smart_241_raw), max(smart_242_raw)
+        FROM day WHERE NOT no_smart AND serial_number IS NOT NULL GROUP BY serial_number
+        ON CONFLICT DO UPDATE SET last_date = excluded.last_date,
+            smart_241_raw = excluded.smart_241_raw, smart_242_raw = excluded.smart_242_raw
+    """)
+    return resets
+
+
+def quarter_boot_models(con, boot_share):
+    """Boot models by the model rule, on this quarter's rows only (for pod_days)."""
+    rows = con.execute("""
+        SELECT model, sum(rows_total), sum(rows_no_smart), sum(rows_slot_file), sum(rows_empty_slot)
+        FROM day_models GROUP BY model""").fetchall()
+    keys = ("rows_total", "rows_no_smart", "rows_slot_file", "rows_empty_slot")
+    return [r[0] for r in rows if boot_check(dict(zip(keys, r[1:])), boot_share)[0]]
+
+
+def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source, boot_share,
+                  prev_state=None):
+    """Audit every day CSV of one quarter zip, one day at a time, and write the quarter
+    tables into out_dir. prev_state: the previous quarter's end_state.parquet (may not
+    exist). Returns the largest day CSV's bytes."""
+    missing = [i for i in POD_DAY_SMART if i not in smart_ids]
+    if missing:
+        raise ValueError(f"smart_ids must include {missing} for the pod-day table")
     days = day_members(zip_path)
     if not days:
         raise RuntimeError(f"{zip_path} has no day CSVs")
     con = duckdb.connect()
-    con.execute("CREATE TABLE drives (model VARCHAR, serial_number VARCHAR, failed BOOLEAN, "
-                "PRIMARY KEY (model, serial_number))")
+    con.execute("CREATE TABLE drives (model VARCHAR, serial_number VARCHAR, PRIMARY KEY (model, serial_number))")
+    con.execute("CREATE TABLE events (serial_number VARCHAR, model VARCHAR, date DATE, "
+                "pod_key VARCHAR, vault_key VARCHAR, had_smart BOOLEAN)")
+    con.execute("CREATE TABLE state (serial VARCHAR PRIMARY KEY, last_date DATE, "
+                "smart_241_raw BIGINT, smart_242_raw BIGINT)")
+    found = prev_state is not None and prev_state.exists()
+    if found:
+        con.execute(f"INSERT INTO state SELECT serial, last_date, smart_241_raw, smart_242_raw "
+                    f"FROM read_parquet('{prev_state}')")
+    quality = {("previous_end_state", "found"): int(found)}
+
     day_csv = scratch / "day.csv"
     largest = 0
-    quality = {}
     for i, (day, member) in enumerate(days):
         largest = max(largest, extract_member(zip_path, member, day_csv))
         present = load_day(con, day_csv, smart_ids)
@@ -122,13 +227,41 @@ def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source):
                 f"TO '{out_dir / 'days.csv'}' (HEADER)")
     con.execute(f"""
         COPY (
-            SELECT m.*, coalesce(d.drives, 0) AS drives, coalesce(d.failed_drives, 0) AS failed_drives, {tag}
+            SELECT m.*, coalesce(d.drives, 0) AS drives, coalesce(e.failed_drives, 0) AS failed_drives, {tag}
             FROM (SELECT model, {sums} FROM day_models GROUP BY model) m
-            LEFT JOIN (SELECT model, count(*) AS drives, count(*) FILTER (failed) AS failed_drives
-                       FROM drives GROUP BY model) d USING (model)
+            LEFT JOIN (SELECT model, count(*) AS drives FROM drives GROUP BY model) d USING (model)
+            LEFT JOIN (SELECT model, count(DISTINCT serial_number) AS failed_drives
+                       FROM events GROUP BY model) e USING (model)
             ORDER BY model
         ) TO '{out_dir / 'models.csv'}' (HEADER)
     """)
+    parquet = "(FORMAT parquet, COMPRESSION zstd)"
+    con.execute(f"COPY (SELECT *, {tag} FROM events ORDER BY date, serial_number) "
+                f"TO '{out_dir / 'events.parquet'}' {parquet}")
+
+    con.execute("CREATE TEMP TABLE boot AS SELECT unnest(?::VARCHAR[]) AS model",
+                [quarter_boot_models(con, boot_share)])
+    con.execute(f"""
+        COPY (
+            WITH p AS (
+                SELECT date, pod_key, vault_key,
+                       sum(drives)::BIGINT AS drives, sum(drives_lba)::BIGINT AS drives_lba,
+                       sum(temp_sum) / nullif(sum(temp_n), 0) AS temp_mean, max(temp_max) AS temp_max,
+                       sum(tbw_sum) / nullif(sum(tbw_n), 0) AS tb_written_mean, max(tbw_max) AS tb_written_max,
+                       sum(tbr_sum) / nullif(sum(tbr_n), 0) AS tb_read_mean, max(tbr_max) AS tb_read_max,
+                       sum(resets_written)::BIGINT AS resets_written, sum(resets_read)::BIGINT AS resets_read
+                FROM pod_parts WHERE model NOT IN (SELECT model FROM boot) GROUP BY ALL),
+            f AS (
+                SELECT date, pod_key, count(*) AS failures FROM events
+                WHERE pod_key IS NOT NULL AND model NOT IN (SELECT model FROM boot) GROUP BY ALL)
+            SELECT p.*, coalesce(f.failures, 0) AS failures, {tag}
+            FROM p LEFT JOIN f USING (date, pod_key)
+            ORDER BY date, pod_key
+        ) TO '{out_dir / 'pod_days.parquet'}' {parquet}
+    """)
+    con.execute(f"COPY (SELECT * FROM state WHERE last_date = DATE '{days[-1][0]}' ORDER BY serial) "
+                f"TO '{out_dir / 'end_state.parquet'}' {parquet}")
+
     with open(out_dir / "quality.csv", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["quarter", "check", "column", "count", "data_source"])
@@ -138,8 +271,8 @@ def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source):
 
 
 def audit_stages(cfg, sources, fetch=None, keep_zips=False):
-    """One pass-1 stage per quarter that has a zip. Hashed on its quarter, URL and the
-    column config, so extending the range only adds stages."""
+    """One pass-1 stage per quarter that has a zip. Hashed on AUDIT_VERSION, its quarter,
+    URL, boot_share and the column config, so extending the range only adds stages."""
     stages = []
     for row in sources:
         quarter, url = row["quarter"], row["url"]
@@ -150,8 +283,9 @@ def audit_stages(cfg, sources, fetch=None, keep_zips=False):
         def build(work, storage, quarter=quarter, url=url, out=out):
             check_budget(storage, quarter, cfg["budget"])
             zip_path = local_zip(storage, url, fetch)
+            prev = storage.path(DURABLE, f"audit/quarters/{previous_quarter(quarter)}/end_state.parquet")
             largest = audit_quarter(zip_path, work / out, work, cfg["smart_ids"], quarter,
-                                    storage.data_source)
+                                    storage.data_source, cfg["selection"]["boot_share"], prev)
             log_download(storage, quarter, zip_path.stat().st_size, largest, None)
             if not keep_zips:
                 zip_path.unlink()
@@ -162,7 +296,8 @@ def audit_stages(cfg, sources, fetch=None, keep_zips=False):
             outputs=[out],
             build=build,
             keys=["data_source", "smart_ids"],
-            params={"quarter": quarter, "url": url},
+            params={"version": AUDIT_VERSION, "quarter": quarter, "url": url,
+                    "boot_share": cfg["selection"]["boot_share"]},
         ))
     return stages
 
@@ -220,7 +355,7 @@ def model_summary(model, by_quarter, days, quarters, smart_ids, rule):
          "failed_drives": sum(r["failed_drives"] for r in by_quarter.values())}
     for col in coverage_columns(smart_ids):
         s[f"share_{col}"] = share(totals[f"nonnull_{col}"], totals["rows"])
-    s["share_pod"] = share(totals["pod_rows"], totals["rows"])
+    s["share_pod_key"] = share(totals["pod_key_rows"], totals["rows"])
 
     window = swn_window(by_quarter, quarters, rule["min_coverage"])
     in_window = [d for d in days if quarter_of_date(d["date"]) in window]
@@ -230,11 +365,11 @@ def model_summary(model, by_quarter, days, quarters, smart_ids, rule):
         min(sum(d["nonnull_smart_241_raw"] for d in in_window), sum(d["nonnull_smart_242_raw"] for d in in_window)),
         sum(d["rows"] for d in in_window))
 
-    pod_from = next((d["date"] for d in days if d["rows"] and d["pod_rows"] / d["rows"] >= rule["min_coverage"]), "")
+    pod_from = next((d["date"] for d in days if d["rows"] and d["pod_key_rows"] / d["rows"] >= rule["min_coverage"]), "")
     in_pod = [d for d in days if pod_from and d["date"] >= pod_from]
     s["pod_from"] = pod_from
     s["pod_failures"] = sum(d["failures"] for d in in_pod)
-    s["pod_coverage"] = share(sum(d["pod_rows"] for d in in_pod), sum(d["rows"] for d in in_pod))
+    s["pod_coverage"] = share(sum(d["pod_key_rows"] for d in in_pod), sum(d["rows"] for d in in_pod))
     s["pod_ok"] = bool(pod_from) and s["pod_failures"] >= rule["min_failures"] \
         and s["pod_coverage"] >= rule["min_coverage"]
 

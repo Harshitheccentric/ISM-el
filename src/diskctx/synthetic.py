@@ -177,14 +177,19 @@ class SyntheticFleet:
         return row
 
     def _lba_counters(self, drive, day, days_in):
-        """Cumulative LBAs written/read (512 B each). Starts above 2^31; resets on reset_day."""
+        """Cumulative LBAs written/read (512 B each). Starts above 2^31; never decreases
+        except on reset_day."""
         lbas_per_day = drive.tb_per_day * 1e12 / 512
-        if drive.age_days == 0 and days_in < 20:
-            lbas_per_day = 14e12 / 20 / 512  # fill phase: a new drive filled in ~20 days
         if drive.reset_day is not None and day >= drive.reset_day:
             n = (day - drive.reset_day).days
             return int(n * lbas_per_day), int(n * lbas_per_day / 2)
-        written = 3e10 + (drive.age_days + days_in) * lbas_per_day
+        if drive.age_days == 0:
+            # fill phase: a new drive is filled in ~20 days, then writes at its normal rate
+            fill_per_day = 14e12 / 20 / 512
+            fill_days = min(days_in, 20)
+            written = 3e10 + fill_days * fill_per_day + (days_in - fill_days) * lbas_per_day
+        else:
+            written = 3e10 + (drive.age_days + days_in) * lbas_per_day
         return int(written), int(written / 2)
 
     # --- files --------------------------------------------------------------------

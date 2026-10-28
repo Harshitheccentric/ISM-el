@@ -120,6 +120,12 @@ def quarters_between(start, end):
     return out
 
 
+def previous_quarter(quarter):
+    """'2026Q1' -> '2025Q4'"""
+    year, q = parse_quarter(quarter)
+    return f"{year - 1}Q4" if q == 1 else f"{year}Q{q - 1}"
+
+
 def config_hash(cfg, keys=None):
     """Short sha256 of the config (or of only `keys`), ignoring path keys.
 
