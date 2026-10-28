@@ -422,8 +422,43 @@
     failure event: nobody disappears across the gap.
 
 ## Next
-- Harsh: decide the study settings from the labels/splits table (Done).
+- Harsh: decide the study settings from the labels/splits table (Done: kept as they
+  are, frozen below, tag `studies-frozen`).
 - **M4** — features S/W/N/P (requirements below).
+
+## Frozen before modelling (2026-10-28)
+Fixed before any model is trained (git tag `studies-frozen`); not to be changed after
+looking at results. Every test cell has at least 60 failed drives (900 pooled in Study P,
+697 in Study W).
+- **Horizons:** N = 7, 14, 30 days (`horizons`).
+- **Study W windows** (S/W/N features; per model, `splits/windows.csv`): the config
+  window ends at its last quarter with ≥ 10 failures; the last 2 quarters are test, the
+  2 before are val, the rest train.
+
+  | Model | Train | Val | Test |
+  |---|---|---|---|
+  | ST4000DM000 | 2016-01-01 – 2023-09-30 | 2023-10-01 – 2024-03-31 | 2024-04-01 – 2024-09-30 |
+  | ST12000NM0008 | 2019-10-01 – 2025-06-30 | 2025-07-01 – 2025-12-31 | 2026-01-01 – 2026-06-30 |
+  | ST8000NM0055 | 2016-10-01 – 2025-06-30 | 2025-07-01 – 2025-12-31 | 2026-01-01 – 2026-06-30 |
+  | ST8000DM002 | 2016-04-01 – 2025-06-30 | 2025-07-01 – 2025-12-31 | 2026-01-01 – 2026-06-30 |
+  | ST14000NM001G | 2020-07-01 – 2025-06-30 | 2025-07-01 – 2025-12-31 | 2026-01-01 – 2026-06-30 |
+  | TOSHIBA MG08ACA16TEY | 2020-10-01 – 2025-06-30 | 2025-07-01 – 2025-12-31 | 2026-01-01 – 2026-06-30 |
+- **Study P windows** (all groups S/W/N/P; same for every model): train 2023-08-01 –
+  2025-03-31, val 2025-04-01 – 2025-09-30, test 2025-10-01 – 2026-06-30. Only models
+  with failures in the test window; ST4000DM000 is out (none).
+- **Split shares:** a drive that fails inside a split window goes to that split; every
+  other drive goes by seeded hash (seed 42) with train 0.5, val 0.2, test 0.3.
+- **Downsampling:** train only, by drive, 20 healthy drives per failed drive
+  (`healthy_per_failed`).
+- **Min-failed-drives rule:** a model enters a study only with ≥ 30 failed drives in
+  train and ≥ 1 each in val and test; otherwise it is left out and listed in
+  `splits/summary.csv` with the reason. Warning below 50 failed drives in a test cell.
+- **Phase 1 pass criteria** (HANDOFF):
+  - Experiment A passes if the 95% CI of the false-alarm relative risk excludes 1 for at
+    least one model.
+  - Experiment B (Study P) passes if the paired bootstrap CI of the FAR reduction, S vs
+    S+W+N+P, excludes 0 on at least 2 of 3 horizons.
+  - Secondary (Study W): the same test for S vs S+W+N.
 
 ## M2 requirements (decided 2026-10-27)
 - Full 2016–2026 range must run on free Colab; never shrink the range to fit Drive.

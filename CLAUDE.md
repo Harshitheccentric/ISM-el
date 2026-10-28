@@ -80,6 +80,8 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
   up to the window end.
 - Compute features on full drive history, then cut to the split window (warm-up).
 - Downsample healthy drives by drive, on train only.
+- The test split is read only by the final evaluation command in M5. No test metrics
+  during development, tuning or debugging; all choices use train and val only.
 
 ## Notebook / Colab
 - One ROOT. On Colab it is a Drive folder (mount guarded by `try: import google.colab`);
