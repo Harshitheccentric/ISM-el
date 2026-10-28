@@ -33,6 +33,10 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
 - Pod key = datacenter + cluster_id + vault_id + pod_id (pod_id alone is not unique).
 - SMART raw values are 64-bit ints (BIGINT, via TRY_CAST). Use raw values, not normalized.
 - A column missing from a quarter becomes null, never an error.
+- Dates: every row's date = the day in its file name (`YYYY-MM-DD.csv`), for every file.
+  A row's own date is parsed strictly (YYYY-MM-DD or M/D/YY) only to count rows whose
+  date is unreadable or not the file's day (audit quality table, status table). Dates
+  never become null.
 - Failure events come from the raw rows before any cleaning (`events.parquet` per
   quarter). Cleaning removes a row's features, never its failure event. Failure counts,
   selection and labels use only the events.

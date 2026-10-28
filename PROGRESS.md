@@ -161,11 +161,40 @@
     `pytest -q` 118 passed.
   - The kept smoke 2026Q1 zip is hard-linked into `local/full/downloads/` (no extra
     disk), so the full run reuses it instead of downloading 1.3 GB again.
+- **Full pass 1 complete (2026-10-28):** all 42 quarters 2016Q1–2026Q2 (9 listed, 33
+  derived, 0 missing), plus select. 29,277 failure events (224 without SMART). Carried
+  241/242 state was found for 41 of 42 quarters (all but 2016Q1). No duplicate rows and
+  no SMART cast failures. Durable `root/full` is 209 MB. Pod fields begin 2023-07-01.
+  Selected (all pod_ok, no warning): ST4000DM000 (S/W/N window 2016Q1–2025Q1, 4,920
+  failures, pod 364), ST12000NM0008 (2019Q4–2026Q2, 2,611, pod 1,558), ST8000NM0055
+  (2016Q4–2026Q2, 2,516, pod 994). ST4000DM000 has no failures after 2024Q3 and no
+  rows after 2025Q1; it stays, and M3 handles it with per-study windows (Harsh).
+- **Date fix (2026-10-28).** The audit counted 210,786 date cast failures. Two day files
+  write dates as M/D/YY: `2018-02-25.csv` (100,253 rows `2/25/18`) and
+  `2019-06-17.csv` (110,532 rows `6/17/19` plus one row `6/15/19`). That left 9
+  failure events with a null date, and pass 2 would have nulled ~210k Parquet dates.
+  - Rule (Harsh): every row's date is the day in its file's name, for every file. A
+    row's own date is parsed strictly (YYYY-MM-DD or M/D/YY) only to count, per
+    quarter, rows whose date is unreadable (`date_unparseable`) or not the file's day
+    (`date_not_file_day`) in quality.csv. The status table shows these counts and lists
+    quarters audited before the check as "not checked", never as zero.
+  - Rerun: only 2018Q1, 2019Q2 and select (their markers deleted; AUDIT_VERSION
+    unchanged, so the other 40 quarters keep their outputs). Their end_state,
+    pod_days, days.csv and models.csv are identical before and after; only
+    events.parquet changed (the 1 + 8 null dates are now filled). So 2018Q2 and 2019Q3
+    did not need a rerun. The selection is identical. New counts: 2018Q1 0 / 0;
+    2019Q2 0 unreadable, 1 not the file's day (the `6/15/19` row).
+  - The other 40 quarters show "not checked" for the date counts. Their old
+    `cast_failed date` was 0, so every row date there was readable ISO; whether any
+    differs from its file's day is unknown.
+  - The resumable download recovered from one real timeout during the 2019Q2 fetch.
+  - Tests: an M/D/YY day file with one row dated another day and one unreadable date;
+    the status table marks quarters not checked. Full `pytest -q` 120 passed.
 
 ## Next
-- **Resume the full pass 1** (finished quarters are skipped; the bad 2023Q1 file is
-  replaced automatically): `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m diskctx run
-  --config configs/full.yaml --stages sources,audit,select`.
+- **Harsh confirms the pass-2 model list** (candidates below); then run pass 2:
+  `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m diskctx run --config configs/full.yaml
+  --stages ingest` (all 42 quarters, ~32 GB downloaded one at a time).
 - **M3** — labels and splits (requirements below).
 
 ## M2 requirements (decided 2026-10-27)
@@ -209,20 +238,16 @@
   ≤ t-1; pod failure counts exclude the drive itself.
 
 ## Open questions
-- When do pod/vault/slot fields start being populated? HANDOFF conflicts
-  (Q2 2023 vs 2026 Q1). 2026Q1 has them (≥95% for every non-boot model from day 1);
-  A full pass 1 answers this for earlier quarters, and the split window is set after it.
-- Durable pass-1 size for the full range: about 15 MB per quarter with pod fields
-  (mostly pod_days). Older quarters without pod fields will be smaller. Check this on
-  the full run.
+- **Pass-2 model list (Harsh to confirm).** Up to 5 models. Candidates beyond the 3
+  selected: pod_ok models with ≥100 failures since 2023-07-01 and full 241/242
+  coverage. Pass 2 downloads every quarter whatever the list, and a model added later
+  means downloading everything again.
 - The carried end state is read when a quarter runs; it is not in the stage hash. If an
   earlier quarter is re-audited later, the next quarter's day-1 deltas are not redone
   automatically (rerun it by deleting its marker). Pass 1 runs quarters in
   chronological order, so a fresh run carries state into every quarter after the first
   one. Each audit marker records `info.carried_state_day1` (true/false) and
   `info.previous_quarter` (tested).
-- Will at least 2 exact model strings have ≥100 failures in the window, with enough in
-  test for usable CIs? 2026Q1 alone gives 1, so this needs a multi-quarter audit.
 - Several high-failure models lack 241/242 (MG08ACA16TA, HUH721212ALN604,
   MG07ACA14TA). They can't be used for W/N under the current rule; HANDOFF's fallback is
   to pool related models or demote a feature group.

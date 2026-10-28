@@ -5,6 +5,10 @@ Reading a day (shared with the audit):
 - Only the needed columns are kept. Empty strings become NULL. ID columns stay strings
   (zero-padded: '031', '0028'). SMART raw values, capacity and failure go through
   TRY_CAST (BIGINT / INTEGER); the audit counts values that the cast turned to NULL.
+- Date: every row's `date` is the day in the file's name (YYYY-MM-DD.csv), the snapshot
+  day. A few files write dates as M/D/YY (2018-02-25.csv, 2019-06-17.csv), so a row's
+  own date is never trusted. It is still parsed (YYYY-MM-DD or M/D/YY only) and the
+  audit counts rows whose own date cannot be read or is not the file's day.
 - A needed column missing from the file becomes a typed NULL, never an error. Because
   each day is projected to this fixed schema, quarters with different columns line up
   without union_by_name.
@@ -17,6 +21,7 @@ Reading a day (shared with the audit):
 """
 
 import csv
+import re
 from pathlib import Path
 
 import duckdb
@@ -30,7 +35,10 @@ from diskctx.storage import DURABLE, Stage
 
 ID_COLUMNS = ["serial_number", "model", "datacenter", "cluster_id", "vault_id", "pod_id", "pod_slot_num"]
 POD_FIELDS = ["datacenter", "cluster_id", "vault_id", "pod_id"]
-CAST_TYPES = {"date": "DATE", "capacity_bytes": "BIGINT", "failure": "INTEGER"}
+CAST_TYPES = {"capacity_bytes": "BIGINT", "failure": "INTEGER"}
+DAY_TEXT_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# A row's own date: YYYY-MM-DD or M/D/YY, nothing else.
+ROW_DATE = "coalesce(try_strptime(\"date\", '%Y-%m-%d'), try_strptime(\"date\", '%m/%d/%y'))::DATE"
 
 
 def smart_columns(smart_ids):
@@ -74,14 +82,17 @@ def read_header(csv_path):
         return next(csv.reader(f))
 
 
-def load_day(con, csv_path, smart_ids):
+def load_day(con, csv_path, smart_ids, day):
     """Load one day CSV into DuckDB. Returns the needed columns present in the file.
+    `day` = the file name's date ('2026-01-01'); it becomes every row's date.
 
     Creates two things in `con`:
       raw_day  table: needed columns as cleaned text, plus no_smart (row has no SMART value)
       day      view:  the same rows with the explicit schema (missing column -> typed NULL)
     The CSV is parsed once; every later query reads the small raw_day table.
     """
+    if not DAY_TEXT_RE.fullmatch(day):
+        raise ValueError(f"day must look like 2026-01-01, got {day!r}")
     header = read_header(csv_path)
     present = [c for c in input_columns(smart_ids) if c in header]
     all_smart = [c for c in header if c.startswith("smart_")]
@@ -96,6 +107,8 @@ def load_day(con, csv_path, smart_ids):
     types = cast_types(smart_ids)
 
     def typed(col):
+        if col == "date":
+            return f"DATE '{day}'"
         if col not in present:
             return f"CAST(NULL AS {types.get(col, 'VARCHAR')})"
         if col in types:
@@ -113,6 +126,17 @@ def load_day(con, csv_path, smart_ids):
     return present
 
 
+def date_checks(con, present, day):
+    """(rows whose own date cannot be read, rows whose own date is not the file's day)
+    for the loaded day. A file without a date column counts every row as unreadable."""
+    if "date" not in present:
+        return con.execute("SELECT count(*) FROM raw_day").fetchone()[0], 0
+    return con.execute(f"""
+        SELECT count(*) FILTER ({ROW_DATE} IS NULL),
+               count(*) FILTER ({ROW_DATE} <> DATE '{day}')
+        FROM raw_day""").fetchone()
+
+
 def day_table(con, smart_ids, data_source, models=None):
     """Rows of the loaded day (boot rows dropped, optionally only `models`) as an Arrow
     table with the fixed output schema."""
@@ -127,10 +151,16 @@ def day_table(con, smart_ids, data_source, models=None):
     return table.cast(arrow_schema(smart_ids))
 
 
-def read_day(csv_path, smart_ids, data_source, models=None):
-    """One day CSV -> Arrow table (explicit schema, boot rows dropped)."""
+def read_day(csv_path, smart_ids, data_source, models=None, day=None):
+    """One day CSV -> Arrow table (explicit schema, boot rows dropped). `day` defaults to
+    the date in the file's name."""
+    if day is None:
+        found = DAY_TEXT_RE.search(Path(csv_path).name)
+        if not found:
+            raise ValueError(f"no YYYY-MM-DD in {Path(csv_path).name}; pass day=")
+        day = found.group(0)
     con = duckdb.connect()
-    load_day(con, csv_path, smart_ids)
+    load_day(con, csv_path, smart_ids, day)
     return day_table(con, smart_ids, data_source, models)
 
 
@@ -142,9 +172,9 @@ def ingest_quarter(zip_path, out_path, scratch, smart_ids, models, data_source):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     largest = 0
     with pq.ParquetWriter(out_path, arrow_schema(smart_ids), compression="zstd") as writer:
-        for _, member in day_members(zip_path):
+        for day, member in day_members(zip_path):
             largest = max(largest, extract_member(zip_path, member, day_csv))
-            load_day(con, day_csv, smart_ids)
+            load_day(con, day_csv, smart_ids, day)
             writer.write_table(day_table(con, smart_ids, data_source, models))
             day_csv.unlink()
     return largest

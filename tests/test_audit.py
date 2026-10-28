@@ -3,6 +3,7 @@ Synthetic data is for tests only; none of these numbers is a result."""
 
 import csv
 import json
+import re
 from datetime import date
 
 import pyarrow.parquet as pq
@@ -11,6 +12,7 @@ from conftest import csv_text
 
 import diskctx.audit as audit
 from diskctx.audit import read_csv_rows, read_selection, select_models, selection_warning, swn_window
+from diskctx.ingest import read_day
 from diskctx.pipeline import run_data
 from diskctx.storage import stage_hashes
 from diskctx.status import status_report
@@ -172,7 +174,8 @@ def test_cast_failures_and_duplicates_are_counted(cfg, zip_fetch):
     quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, "audit/quality.csv")}
     assert quality[("cast_failed", "smart_5_raw")] == 1
     assert quality[("cast_failed", "smart_9_raw")] == 0
-    assert quality[("cast_failed", "date")] == 0
+    assert ("cast_failed", "date") not in quality                  # the date is never cast
+    assert quality[("date_unparseable", "date")] == quality[("date_not_file_day", "date")] == 0
     assert quality[("duplicate_serial_date", "serial_number,date")] == 1
 
 
@@ -359,6 +362,51 @@ def test_missing_previous_state_gives_null_not_error(cfg, zip_fetch):
     quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, "audit/quarters/2026Q1/quality.csv")}
     assert quality[("previous_end_state", "found")] == 0
     assert storage.read_marker("audit_2026Q1")["info"]["carried_state_day1"] is False
+
+
+def test_file_name_date_wins_and_odd_row_dates_are_counted(cfg, zip_fetch):
+    # Like data_Q1_2018.zip's 2018-02-25.csv: dates written M/D/YY, plus one row dated
+    # another day (like the 6/15/19 row in 2019-06-17.csv) and one unreadable date.
+    day = "2026-01-02"
+    rows = [make_row(day, f"M{i}", "SYNTH X", slot=f"{i:04d}") for i in range(4)]
+    for r in rows:
+        r["date"] = "1/2/26"
+    rows[1]["failure"] = "1"
+    rows[2]["date"] = "12/31/25"        # readable, but not the file's day
+    rows[3]["date"] = "2026/01/02"      # neither YYYY-MM-DD nor M/D/YY
+    storage = run_crafted(cfg, zip_fetch, {day: rows})
+
+    events = parquet_rows(storage, "audit/quarters/2026Q1/events.parquet")
+    assert [(e["serial_number"], str(e["date"])) for e in events] == [("M1", day)]
+    quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, "audit/quarters/2026Q1/quality.csv")}
+    assert quality[("date_unparseable", "date")] == 1
+    assert quality[("date_not_file_day", "date")] == 1
+    assert {str(d["date"]) for d in rows_of(storage, "audit/quarters/2026Q1/days.csv")} == {day}
+
+    report = status_report(storage, [], cfg)
+    assert "date checks (rows; the file-name date is used): 1 quarters checked, 1 with issues" in report
+    assert re.search(r"2026Q1\s+1\s+1", report)
+
+    members = crafted_zip("2026Q1", {day: rows})
+    path = storage.work_dir / f"{day}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(members[f"data_Q1_2026/{day}.csv"])
+    t = read_day(path, cfg["smart_ids"], "synthetic")
+    assert {str(d) for d in t.column("date").to_pylist()} == {day}  # every row: the file's day
+    assert t.num_rows == 4
+
+
+def test_status_marks_quarters_audited_before_the_date_check(cfg):
+    storage = Storage.from_config(cfg)
+    for quarter, checks in (("2025Q4", "counter_reset,smart_241_raw,0\n"),
+                            ("2026Q1", "date_unparseable,date,0\ndate_not_file_day,date,0\n")):
+        path = storage.path(DURABLE, f"audit/quarters/{quarter}/quality.csv")
+        path.parent.mkdir(parents=True)
+        lines = "".join(f"{quarter},{c},synthetic\n" for c in checks.strip().split("\n"))
+        path.write_text("quarter,check,column,count,data_source\n" + lines)
+    report = status_report(storage, [], cfg)
+    assert "1 quarters checked, 0 with issues" in report
+    assert "not checked (audited before the date check): 1 quarters (2025Q4)" in report
 
 
 def test_counter_reset_gives_null_and_is_counted(cfg, zip_fetch):

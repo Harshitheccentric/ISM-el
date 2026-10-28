@@ -224,6 +224,38 @@ def sources_lines(storage):
     ]
 
 
+DATE_CHECKS = ("date_unparseable", "date_not_file_day")
+
+
+def date_check_lines(storage):
+    """Rows per audited quarter whose own date was unreadable or not the file's day (the
+    file's day is used either way). Quarters audited before this check are listed as
+    not checked, so a missing count is never shown as zero."""
+    quarter_dirs = sorted(storage.path(DURABLE, "audit/quarters").glob("*/quality.csv"))
+    if not quarter_dirs:
+        return []
+    rows, unchecked, checked_names = [], [], []
+    for path in quarter_dirs:
+        with open(path, newline="") as f:
+            counts = {r["check"]: int(r["count"]) for r in csv.DictReader(f) if r["check"] in DATE_CHECKS}
+        quarter = path.parent.name
+        if len(counts) < len(DATE_CHECKS):
+            unchecked.append(quarter)
+            continue
+        checked_names.append(quarter)
+        if any(counts.values()):
+            rows.append({"quarter": quarter, **{c: counts[c] for c in DATE_CHECKS}})
+    lines = ["", f"date checks (rows; the file-name date is used): {len(checked_names)} quarters "
+                 f"checked, {len(rows)} with issues"]
+    if rows:
+        lines.append(format_table(rows))
+    if unchecked:
+        which = (f"all except {', '.join(checked_names)}" if len(checked_names) < len(unchecked)
+                 else ", ".join(unchecked))
+        lines.append(f"not checked (audited before the date check): {len(unchecked)} quarters ({which})")
+    return lines
+
+
 def status_report(storage, stages, cfg):
     """Free space, model selection, stage states, and measured bytes per quarter, as text."""
     log = read_download_log(storage)
@@ -237,6 +269,7 @@ def status_report(storage, stages, cfg):
         "",
         *sources_lines(storage),
         *selection_lines(storage, cfg),
+        *date_check_lines(storage),
         "",
         format_table(stage_rows(storage, stages, cfg)),
         "",

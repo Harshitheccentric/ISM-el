@@ -80,7 +80,7 @@ def test_pod_key_on_fixture():
 def test_pod_key_tells_apart_same_pod_id_in_two_vaults(tmp_path):
     fleet = SyntheticFleet(7, "2026Q1", "2026Q1")
     (tmp_path / "day.csv").write_text(fleet.day_csv(fleet.days[0]))
-    t = read_day(tmp_path / "day.csv", SMART_IDS, "synthetic")
+    t = read_day(tmp_path / "day.csv", SMART_IDS, "synthetic", day=fleet.days[0].isoformat())
     pod_key_checks(t)
     keys_for_02 = {k for k, p in zip(t.column("pod_key").to_pylist(), t.column("pod_id").to_pylist()) if p == "02"}
     assert keys_for_02 == {"sac0|000|1154|02", "ams5|031|2017|02"}
@@ -178,7 +178,7 @@ def test_bad_value_becomes_null_in_ingest(tmp_path):
     row = dict.fromkeys(["date", "serial_number", "model", "smart_5_raw", "smart_9_raw"], "")
     row.update(date="2026-01-01", serial_number="S1", model="M", smart_5_raw="12abc", smart_9_raw="100")
     (tmp_path / "day.csv").write_text(csv_text([row], list(row)))
-    t = read_day(tmp_path / "day.csv", SMART_IDS, "synthetic")
+    t = read_day(tmp_path / "day.csv", SMART_IDS, "synthetic", day="2026-01-01")
     assert t.column("smart_5_raw").to_pylist() == [None]
     assert t.column("smart_9_raw").to_pylist() == [100]
     assert t.column("pod_key").to_pylist() == [None]

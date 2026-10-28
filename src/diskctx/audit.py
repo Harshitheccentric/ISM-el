@@ -11,7 +11,9 @@ audit_<quarter> stage -> audit/quarters/<quarter>/
                     drives and distinct failed drives.
   quality.csv       per column: values that were non-empty but became NULL after
                     TRY_CAST; duplicate (serial_number, date) rows; 241/242 counter
-                    resets; whether the previous quarter's end state was found.
+                    resets; whether the previous quarter's end state was found; rows
+                    whose own date is unreadable or not the file's day (the file's
+                    day is used either way, see ingest.py).
   events.parquet    failure events: every failure=1 row of every model, taken BEFORE any
                     cleaning (serial, model, date, pod_key, vault_key, had_smart). The
                     no-SMART rule removes a row's features, never its failure event.
@@ -58,7 +60,7 @@ import json
 import duckdb
 
 from diskctx.config import previous_quarter, quarters_between
-from diskctx.ingest import POD_FIELDS, cast_types, load_day, q, smart_columns
+from diskctx.ingest import POD_FIELDS, cast_types, date_checks, load_day, q, smart_columns
 from diskctx.rawzip import day_members, extract_member
 from diskctx.sources import local_zip
 from diskctx.status import SELECTION_FILE, check_budget, log_download
@@ -128,6 +130,9 @@ def audit_day(con, present, smart_ids, day, first):
             ).fetchone()[0]
     quality[("duplicate_serial_date", "serial_number,date")] = con.execute(
         "SELECT count(serial_number) - count(DISTINCT serial_number) FROM raw_day").fetchone()[0]
+    unreadable, other_day = date_checks(con, present, day)
+    quality[("date_unparseable", "date")] = unreadable
+    quality[("date_not_file_day", "date")] = other_day
     return quality
 
 
@@ -215,7 +220,7 @@ def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source, b
     largest = 0
     for i, (day, member) in enumerate(days):
         largest = max(largest, extract_member(zip_path, member, day_csv))
-        present = load_day(con, day_csv, smart_ids)
+        present = load_day(con, day_csv, smart_ids, day)
         for key, n in audit_day(con, present, smart_ids, day, first=(i == 0)).items():
             quality[key] = quality.get(key, 0) + n
         day_csv.unlink()
