@@ -8,7 +8,17 @@ local_dir: data/local         # cache tier + scratch (/content/... on Colab)
 
 start_quarter: 2016Q1
 end_quarter: 2026Q2
-models: []                    # exact model strings; non-empty skips the audit (pass 1)
+# Exact model strings; non-empty skips the audit (pass 1) and select. Pass 2 keeps these
+# (Harsh, 2026-10-28): the audit's 3 selected models, 2 more steady pod_ok models, and
+# MG08ACA16TEY as a second vendor. Which models enter each study is set later in config.
+# ST16000NM001G is left out: its pod_key coverage is 0.82-0.91 from 2023Q4 to 2024Q4.
+models:
+  - ST4000DM000
+  - ST12000NM0008
+  - ST8000NM0055
+  - ST8000DM002
+  - ST14000NM001G
+  - TOSHIBA MG08ACA16TEY
 
 horizons: [7, 14, 30]         # days
 seed: 42

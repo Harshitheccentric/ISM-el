@@ -5,9 +5,16 @@ import pyarrow.parquet as pq
 import pytest
 from conftest import csv_text, write_zip
 
-from diskctx.ingest import arrow_schema, ingest_quarter, ingest_stages, output_columns, read_day
+from diskctx.ingest import (
+    arrow_schema,
+    ingest_quarter,
+    ingest_stages,
+    output_columns,
+    parquet_path,
+    read_day,
+)
 from diskctx.pipeline import run_data
-from diskctx.status import BudgetError, read_download_log
+from diskctx.status import BudgetError, read_download_log, status_report
 from diskctx.storage import Storage, stage_hashes
 from diskctx.synthetic import MODEL_BOOT, MODEL_LBA, MODEL_NO_LBA, SyntheticFleet
 
@@ -96,12 +103,13 @@ def test_old_format_quarter_missing_columns_become_null(tmp_path):
     members["__MACOSX/outer/._2016-01-01.csv"] = "junk"
     zip_path = write_zip(tmp_path / "data_Q1_2016.zip", members)
 
-    out = tmp_path / "out" / "2016Q1.parquet"
-    largest = ingest_quarter(zip_path, out, tmp_path, SMART_IDS, None, "synthetic")
-    t = pq.read_table(out)
+    outs = {m: tmp_path / "out" / f"{m}.parquet" for m in (MODEL_LBA, MODEL_NO_LBA)}
+    largest, unreadable, other_day = ingest_quarter(zip_path, outs, tmp_path, SMART_IDS, "synthetic")
+    t = pa.concat_tables(pq.read_table(p) for p in outs.values())
     assert largest == max(len(text.encode()) for name, text in members.items() if name.endswith(".csv")
                           and "__MACOSX" not in name)
-    assert pq.ParquetFile(out).num_row_groups == len(days) == 91      # 2016 is a leap year
+    assert (unreadable, other_day) == (0, 0)
+    assert pq.ParquetFile(outs[MODEL_LBA]).num_row_groups == len(days) == 91   # 2016 is a leap year
     assert not (tmp_path / "day.csv").exists()
 
     data_drives = [d for d in fleet.drives if d.model != MODEL_BOOT]
@@ -116,24 +124,30 @@ def test_old_format_quarter_missing_columns_become_null(tmp_path):
 # --- pass 2 stage ---------------------------------------------------------------------
 
 
-def test_pass2_allowlist_writes_selected_models_only(cfg, fleet_fetch):
-    cfg["models"] = [MODEL_LBA]
+def test_pass2_allowlist_writes_one_file_per_model_per_quarter(cfg, fleet_fetch):
+    cfg["models"] = [MODEL_LBA, MODEL_NO_LBA]
     fetch = fleet_fetch(SyntheticFleet(cfg["seed"], "2026Q1", "2026Q1"))
     results = run_data(cfg, fetch=fetch)
     assert results == {"sources": "built", "ingest_2026Q1": "built"}   # allowlist skips audit + select
 
     storage = Storage.from_config(cfg)
-    path = storage.run_dir / "parquet" / "2026Q1.parquet"
-    pf = pq.ParquetFile(path)
-    t = pf.read()
-    assert set(t.column("model").to_pylist()) == {MODEL_LBA}
-    assert t.column_names == output_columns(SMART_IDS)
-    assert pf.metadata.row_group(0).column(0).compression == "ZSTD"
-    assert pf.num_row_groups == 90
-    assert set(t.column("data_source").to_pylist()) == {"synthetic"}
+    assert parquet_path(MODEL_LBA, "2026Q1") == "parquet/SYNTH_HDD14TEY/2026Q1.parquet"
+    paths = [storage.run_dir / parquet_path(m, "2026Q1") for m in cfg["models"]]
+    for model, path in zip(cfg["models"], paths):
+        pf = pq.ParquetFile(path)
+        t = pf.read()
+        assert set(t.column("model").to_pylist()) == {model}           # only its own model
+        assert t.column_names == output_columns(SMART_IDS)
+        assert pf.metadata.row_group(0).column(0).compression == "ZSTD"
+        assert pf.num_row_groups == 90
+        assert set(t.column("data_source").to_pylist()) == {"synthetic"}
+
+    # pass 2 also counts odd row dates over every row of every day file
+    assert storage.read_marker("ingest_2026Q1")["info"] == {"date_unparseable": 0, "date_not_file_day": 0}
+    assert "1 quarters checked, 0 with issues" in status_report(storage, [], cfg)
 
     log = read_download_log(storage)["2026Q1"]
-    assert log["parquet_bytes"] == path.stat().st_size
+    assert log["parquet_bytes"] == sum(p.stat().st_size for p in paths)
     assert log["zip_bytes"] > 0 and log["largest_day_bytes"] > 0
     assert list(storage.download_dir.iterdir()) == []                   # zip deleted
 

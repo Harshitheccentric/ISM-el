@@ -191,10 +191,34 @@
   - Tests: an M/D/YY day file with one row dated another day and one unreadable date;
     the status table marks quarters not checked. Full `pytest -q` 120 passed.
 
+- **Pass-2 setup (2026-10-28).**
+  - Model list (Harsh), set as the `models:` allowlist in `configs/full.yaml`:
+    ST4000DM000, ST12000NM0008, ST8000NM0055 (the audit's 3), ST8000DM002,
+    ST14000NM001G, TOSHIBA MG08ACA16TEY (second vendor). Which models enter each study is
+    decided later in config.
+  - ST16000NM001G left out by Harsh's rule (every quarter from 2023Q4 must have
+    pod_key coverage ≥0.95). Its coverage was 0.914 (2023Q4), 0.965 (2024Q1),
+    0.831 / 0.821 / 0.878 (2024Q2–Q4), then 1.0 from 2025Q1: about 3,600 of its ~27,500
+    drives had no pod location for over a year, not just the July 2023 rollout.
+  - Size estimate: 224.0 M rows × 26.6 bytes/row (ST12000NM0008 2026Q1: 44.3 MB for
+    1.66 M rows) ≈ 6.0 GB in total, under the 10 GB limit. By model: ST4000DM000 1.86,
+    ST8000NM0055 1.23, ST12000NM0008 1.19, ST8000DM002 0.90, ST14000NM001G 0.56,
+    MG08ACA16TEY 0.23 GB. Largest quarter ≈ 191 MB (2022Q4). Older quarters may compress
+    differently; the download log measures each quarter.
+  - Layout: one file per model per quarter, `parquet/<model>/<quarter>.parquet`
+    (spaces → `_`, e.g. `TOSHIBA_MG08ACA16TEY`), so a study copies only the models and
+    quarters it needs to Drive.
+  - Pass 2 also counts odd row dates over every row of every day file and stores them in
+    its marker (`info.date_unparseable`, `info.date_not_file_day`). The status table
+    uses them for the 40 quarters audited before the date check.
+  - The 2026Q1 zip is hard-linked into `local/full/downloads/` again (the audit deleted
+    its link after use).
+  - Full `pytest -q` 120 passed.
+
 ## Next
-- **Harsh confirms the pass-2 model list** (candidates below); then run pass 2:
-  `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m diskctx run --config configs/full.yaml
-  --stages ingest` (all 42 quarters, ~32 GB downloaded one at a time).
+- **Pass 2** (Harsh runs it in a separate terminal; all 42 quarters, ~32 GB downloaded
+  one at a time, ~6 GB Parquet kept): `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m
+  diskctx run --config configs/full.yaml --stages ingest`.
 - **M3** — labels and splits (requirements below).
 
 ## M2 requirements (decided 2026-10-27)
@@ -237,11 +261,14 @@
 - Pod features come from `pod_days.parquet` (whole pod, all non-boot models), lagged to
   ≤ t-1; pod failure counts exclude the drive itself.
 
+## M5 requirements (decided 2026-10-28)
+- TOSHIBA MG08ACA16TEY has 215 failures in 2025Q3 (its other quarters since 2023Q3:
+  10–51), inside Study P's validation window. Choose alarm thresholds per model, and
+  report pooled results both with and without MG08ACA16TEY.
+- ST4000DM000 has no failures after 2024Q3 and no rows after 2025Q1; M3 handles it with
+  per-study windows (Harsh, 2026-10-28).
+
 ## Open questions
-- **Pass-2 model list (Harsh to confirm).** Up to 5 models. Candidates beyond the 3
-  selected: pod_ok models with ≥100 failures since 2023-07-01 and full 241/242
-  coverage. Pass 2 downloads every quarter whatever the list, and a model added later
-  means downloading everything again.
 - The carried end state is read when a quarter runs; it is not in the stage hash. If an
   earlier quarter is re-audited later, the next quarter's day-1 deltas are not redone
   automatically (rerun it by deleting its marker). Pass 1 runs quarters in

@@ -227,19 +227,34 @@ def sources_lines(storage):
 DATE_CHECKS = ("date_unparseable", "date_not_file_day")
 
 
-def date_check_lines(storage):
-    """Rows per audited quarter whose own date was unreadable or not the file's day (the
-    file's day is used either way). Quarters audited before this check are listed as
-    not checked, so a missing count is never shown as zero."""
-    quarter_dirs = sorted(storage.path(DURABLE, "audit/quarters").glob("*/quality.csv"))
-    if not quarter_dirs:
-        return []
-    rows, unchecked, checked_names = [], [], []
-    for path in quarter_dirs:
+def quarter_date_counts(storage, quarter):
+    """{check: rows} for one quarter: from the audit's quality.csv, else from the pass-2
+    marker (pass 2 counts them too). None if neither has run the date check."""
+    path = storage.path(DURABLE, f"audit/quarters/{quarter}/quality.csv")
+    if path.exists():
         with open(path, newline="") as f:
             counts = {r["check"]: int(r["count"]) for r in csv.DictReader(f) if r["check"] in DATE_CHECKS}
-        quarter = path.parent.name
-        if len(counts) < len(DATE_CHECKS):
+        if len(counts) == len(DATE_CHECKS):
+            return counts
+    info = (storage.read_marker(f"ingest_{quarter}") or {}).get("info", {})
+    if all(c in info for c in DATE_CHECKS):
+        return {c: info[c] for c in DATE_CHECKS}
+    return None
+
+
+def date_check_lines(storage):
+    """Rows per quarter whose own date was unreadable or not the file's day (the file's
+    day is used either way), from the audit or pass 2. Quarters read before this check
+    existed are listed as not checked, so a missing count is never shown as zero."""
+    audited = {p.parent.name for p in storage.path(DURABLE, "audit/quarters").glob("*/quality.csv")}
+    ingested = {p.stem[len("ingest_"):] for p in storage.marker_dir.glob("ingest_*.json")}
+    quarters = sorted(audited | ingested)
+    if not quarters:
+        return []
+    rows, unchecked, checked_names = [], [], []
+    for quarter in quarters:
+        counts = quarter_date_counts(storage, quarter)
+        if counts is None:
             unchecked.append(quarter)
             continue
         checked_names.append(quarter)
@@ -252,7 +267,8 @@ def date_check_lines(storage):
     if unchecked:
         which = (f"all except {', '.join(checked_names)}" if len(checked_names) < len(unchecked)
                  else ", ".join(unchecked))
-        lines.append(f"not checked (audited before the date check): {len(unchecked)} quarters ({which})")
+        lines.append(f"not checked yet (read before the date check; pass 2 fills these in): "
+                     f"{len(unchecked)} quarters ({which})")
     return lines
 
 

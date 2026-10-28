@@ -406,7 +406,16 @@ def test_status_marks_quarters_audited_before_the_date_check(cfg):
         path.write_text("quarter,check,column,count,data_source\n" + lines)
     report = status_report(storage, [], cfg)
     assert "1 quarters checked, 0 with issues" in report
-    assert "not checked (audited before the date check): 1 quarters (2025Q4)" in report
+    assert "not checked yet (read before the date check; pass 2 fills these in): 1 quarters (2025Q4)" in report
+
+    # once pass 2 has read 2025Q4, its marker's counts fill the gap
+    storage.marker_dir.mkdir(parents=True, exist_ok=True)
+    storage.marker_path("ingest_2025Q4").write_text(
+        json.dumps({"info": {"date_unparseable": 0, "date_not_file_day": 3}}))
+    report = status_report(storage, [], cfg)
+    assert "2 quarters checked, 1 with issues" in report
+    assert re.search(r"2025Q4\s+0\s+3", report)
+    assert "not checked yet" not in report
 
 
 def test_counter_reset_gives_null_and_is_counted(cfg, zip_fetch):
