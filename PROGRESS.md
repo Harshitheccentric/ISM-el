@@ -477,6 +477,7 @@ looking at results. Every test cell has at least 60 failed drives (900 pooled in
   - Bootstrap: 2,000 paired resamples of drives, stratified by model, the same
     resamples for both feature sets, percentile 95% CI, fixed seed.
   - The Study W secondary test (S vs S+W+N) uses the same rules as B.
+  - Bootstrap seed: 42 (the config seed).
 
 ## M2 requirements (decided 2026-10-27)
 - Full 2016–2026 range must run on free Colab; never shrink the range to fit Drive.
