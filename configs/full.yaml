@@ -34,8 +34,19 @@ selection:
   boot_share: 0.95            # boot model: this share of rows with empty slot or no SMART
 
 # Day files left out as a whole (the day counts as missing), with the evidence. Use this
-# when a file is a copy of another day; a wrong file name would need a date override.
+# when a file is an exact copy of another day; a wrong file name would need a date
+# override. A dropped file's failure flags are lost, so drop only copies without new ones.
+# Kept stale day (not dropped): 2017-01-27.csv is a partial copy of 2017-01-26.csv. SMART 9
+# is +17 h after 01-25 for every model and 0 h from 01-26 to 01-27, so the shared
+# snapshot is 01-26's; 73,585 of 73,699 rows equal 01-26's. It is kept because it carries
+# 22 failure flags (01-26: 0) and 91 newer readings; its stale readings are past data, so
+# they cannot break the t-1 rule (only that day's deltas are stale).
 dropped_days:
+  2017-01-29: >-
+    copy of 2017-01-28.csv (checked 2026-10-28 on the 2017Q1 zip): the same 46 drives
+    (45 HGST HMS5C4040BLE640, 1 ST500LM012 HN, none in the pass-2 models), SMART 9 0 h
+    after 2017-01-28.csv for all 46, while 01-27 -> 01-28 is +18 h; the fleet's other
+    drives are missing 2017-01-28..31
   2017-12-31: >-
     copy of 2018-01-01.csv (checked 2026-10-28 on the 6 pass-2 models,
     tools/diagnostics/copied_days.py): SMART 9 equals 2018-01-01.csv for all 56,218 drives and is

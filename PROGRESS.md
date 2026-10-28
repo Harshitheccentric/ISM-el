@@ -401,20 +401,28 @@
     So the snapshot is +17 h, not +48 h: it belongs to 01-26 (taken early), not 01-27.
     73,585 of 73,699 rows of 01-27 equal 01-26's; 91 drives (45 HGST HMS5C4040BLE640,
     45 HMS5C4040ALE640, 1 ST500LM012 HN) have a newer reading on 01-27 (+22 to +30 h);
-    01-27 also carries 22 failure flags (01-26: 0). Not changed: Harsh decides (Open
-    questions).
+    01-27 also carries 22 failure flags (01-26: 0).
+  - **Decision (Harsh): keep both 01-26 and 01-27; 01-27 is a kept stale day.** This
+    copy runs backwards: 01-27 repeats the past, not the future, so it cannot break the
+    t-1 rule; it only makes one day's deltas stale, and it carries 22 real failure
+    events. Recorded with the evidence in `configs/full.yaml` (comment above
+    `dropped_days`).
   - Small files: 2017-01-28 (46 rows: 45 of the HMS5C4040BLE640 drives above + 1) is
     +18 h after 01-27, a normal step. 2017-01-29 (the same 46 drives) is 0 h after 01-28:
     a copy of 01-28. 2017-01-30 has no file. 2017-01-31 (61 rows, 60 Hitachi
     HDS722020ALA330 + 1) holds drives not seen on 01-25..01-29; they step +30 h to
     02-01. None of these drives is one of the 6 pass-2 models, so they touch only the
-    audit tables.
+    audit tables. 01-28 and 01-31 are kept.
+  - **2017-01-29 dropped (Harsh):** an exact copy of 01-28, added to `dropped_days`
+    with its evidence. Reran audit 2017Q1; ingest 2017Q1 reran too (the dropped day is
+    in its stage hash) and its Parquet is byte-for-byte unchanged, as are events and
+    end state; days.csv loses 01-29's 2 rows (model × day). Labels and splits reran;
+    splits/summary.csv is unchanged.
   - Of the 72,420 non-boot drives present on 01-27, 0 are missing on 02-01 without a
     failure event: nobody disappears across the gap.
 
 ## Next
-- Harsh: decide the study settings from the labels/splits table (Done), and January
-  2017 (Open questions).
+- Harsh: decide the study settings from the labels/splits table (Done).
 - **M4** — features S/W/N/P (requirements below).
 
 ## M2 requirements (decided 2026-10-27)
@@ -503,12 +511,6 @@
   weighted precision on a synthetic test split matches precision on the whole population.
 
 ## Open questions
-- **January 2017** (details in Done). The shared 01-26/01-27 snapshot is +17 h after
-  01-25, so by the SMART 9 rule it belongs to 01-26 and the 01-27 file is (mostly) a
-  copy of it, holding 22 failure flags and 91 newer readings. Options: drop 01-27 (its
-  22 failure events would then need another home, since events come from the raw rows),
-  or keep both and accept one stale day. Also 2017-01-29 is a copy of 01-28 for its 46
-  drives (none in the 6 models): add it to `dropped_days`?
 - The carried end state is read when a quarter runs; it is not in the stage hash. If an
   earlier quarter is re-audited later, the next quarter's day-1 deltas are not redone
   automatically (rerun it by deleting its marker). Pass 1 runs quarters in
@@ -529,10 +531,16 @@
   after a failure dropped, after the copied days were removed; 104,944 before). So some
   Backblaze "failures" may be removals or redeployments, not hardware deaths; the
   label is "Backblaze flagged the drive as failed", and the paper should say so.
-- **Copied day files.** Five day files were copies of the next day and are dropped
-  (`dropped_days`, `results/diagnostics/copied_days.csv`); the copies carried no failure
-  flags, so events are unchanged. The check covers only the 6 pass-2 models and needs
-  SMART 9; a copy in another model's rows would not be seen.
+- **Copied day files (rule for the paper).** A day file that is an exact copy of
+  another day is dropped and the day counts as missing: 6 files (2017-01-29,
+  2017-12-31, 2019-08-26, 2019-10-15, 2021-07-01, 2022-12-10; `dropped_days` in
+  `configs/full.yaml`, `results/diagnostics/copied_days.csv`). None carried failure
+  flags of its own, so no failure event is lost. One partial copy, 2017-01-27, is kept:
+  it carries 22 failure events and 91 newer readings, and its stale readings are past
+  data (a copy of 2017-01-26), so they cannot leak the future; only that day's deltas
+  are stale. Copies are found from SMART 9 (power-on hours) not advancing between
+  days; the scan covers the 6 pass-2 models, and January 2017 was checked on all
+  models.
 
 ## TODO
 - Pins were chosen as the latest stable 1.x lines; duckdb 2.0.0 (2026-10-21) and
