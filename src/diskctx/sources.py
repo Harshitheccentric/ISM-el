@@ -9,9 +9,13 @@ with its url and kind (listed | derived | missing). The status table shows it.
 """
 
 import csv
+import http.client
 import re
 import shutil
+import time
+import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 from diskctx.config import quarters_between
@@ -22,9 +26,15 @@ DOC_PATH = Path(__file__).resolve().parents[2] / "docs" / "data-sources.md"
 
 URL_RE = re.compile(r"https?://\S+?/data_Q([1-4])_(\d{4})\.zip")
 COLUMNS = ["quarter", "url", "kind", "data_source"]
+DOWNLOAD_TRIES = 5        # per run; a rerun resumes from the partial file
+RETRY_WAIT_SECONDS = 30   # wait 30, 60, 90, 120 s between tries, for short outages
 
 
 class SourceError(RuntimeError):
+    pass
+
+
+class DownloadError(SourceError):
     pass
 
 
@@ -115,20 +125,68 @@ def read_sources(storage):
         return list(csv.DictReader(f))
 
 
-def download(url, dest):
-    """Stream url to dest. Writes to dest.part first, so a broken download never looks done."""
+def total_size(response, resumed):
+    """The whole file's size in bytes: from Content-Range when resuming ('bytes 300-999/1000'),
+    else from Content-Length. None if the server does not say."""
+    if resumed:
+        content_range = response.headers.get("Content-Range", "")
+        return int(content_range.rsplit("/", 1)[1]) if "/" in content_range else None
+    length = response.headers.get("Content-Length")
+    return int(length) if length is not None else None
+
+
+def download(url, dest, tries=DOWNLOAD_TRIES, wait=RETRY_WAIT_SECONDS):
+    """Download url to dest, resuming after network drops.
+
+    Bytes go to dest.part. If dest.part already holds the start of the file (an earlier
+    try or an earlier run), only the rest is requested (an HTTP Range request); if the
+    server ignores the range, it starts over. The file gets its final name only when its
+    size matches the server's. A failed try waits (wait, 2 x wait, ...) and tries again;
+    after `tries` it raises DownloadError and keeps dest.part, so the next run resumes.
+    """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
-    with urllib.request.urlopen(url, timeout=60) as response, open(part, "wb") as f:
-        shutil.copyfileobj(response, f, length=1 << 20)
-    part.replace(dest)
+    for attempt in range(1, tries + 1):
+        have = part.stat().st_size if part.exists() else 0
+        headers = {"Range": f"bytes={have}-"} if have else {}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
+                resumed = have > 0 and response.status == 206   # 200 = range ignored: start over
+                total = total_size(response, resumed)
+                with open(part, "ab" if resumed else "wb") as f:
+                    shutil.copyfileobj(response, f, length=1 << 20)
+            got = part.stat().st_size
+            if total is None or got == total:
+                part.replace(dest)
+                return
+            if got > total:
+                part.unlink()           # more bytes than the file has: not trustworthy
+            problem = f"got {got} of {total} bytes"
+        except urllib.error.HTTPError as e:
+            if e.code == 416:           # the range starts past the end: start over
+                part.unlink(missing_ok=True)
+            problem = f"HTTP {e.code}"
+        except (OSError, http.client.HTTPException) as e:  # timeouts, resets, DNS
+            problem = f"{type(e).__name__}: {e}"
+        print(f"download {url}: {problem} (try {attempt} of {tries})", flush=True)
+        if attempt < tries:
+            time.sleep(wait * attempt)
+    raise DownloadError(f"could not download {url} after {tries} tries ({problem}); "
+                        f"rerun to resume from the partial file")
 
 
 def local_zip(storage, url, fetch=None):
-    """The quarter zip on local disk: reused if a complete copy is there, else fetched
-    with fetch(url, dest) (default: download)."""
+    """The quarter zip on local disk: reused if a readable zip is there, else fetched
+    with fetch(url, dest) (default: download). A file that is not a readable zip (e.g.
+    left by an older, cut-short download) is deleted and fetched again."""
     dest = storage.download_dir / url.rsplit("/", 1)[1]
+    if dest.exists() and not zipfile.is_zipfile(dest):
+        print(f"{dest.name} is not a readable zip; downloading it again", flush=True)
+        dest.unlink()
     if not dest.exists():
         (fetch or download)(url, dest)
+        if not zipfile.is_zipfile(dest):
+            dest.unlink()
+            raise DownloadError(f"{url} did not give a readable zip; rerun to try again")
     return dest

@@ -142,11 +142,30 @@
   SMART 197 (part may be model mix). 187/188/241/242 are *lower* for failing drives;
   that is model mix (whole models lack them), not a leak. A per-model version belongs
   in M4.
+- **Full pass 1, first run (2026-10-28):** 2016Q1–2022Q4 audited (28 quarters, about
+  3–5 min each). It stopped at 2023Q1 with `BadZipFile`: the download was cut short
+  (218.7 MB of 819.1 MB) and was saved as if complete, because `download` never
+  compared bytes with Content-Length. The 28 finished quarters are sound: a cut-short
+  zip cannot be opened (its index is at the end), and 2022Q3's smaller zip (0.79 GB)
+  exactly matches the server's size and has all 92 days.
+  - Fix: `download` checks bytes against Content-Length, retries 3 times, then raises
+    `DownloadError` (a partial file never gets the final name). `local_zip` deletes and
+    re-fetches a file that is not a readable zip, and refuses a fetch that isn't one.
+    4 new tests; full `pytest -q` 116 passed.
+  - Second network drop during 2023Q4 (2023Q1–Q3 had finished). Downloads now resume:
+    a partial `.part` is continued with an HTTP Range request (Backblaze answers
+    `Accept-Ranges: bytes`), starting over only if the server ignores the range. Up to 5
+    tries per run, waiting 30/60/90/120 s between them. After that it stops but keeps
+    the `.part`, so a rerun continues it. Tests: resume after a drop, resume from an
+    earlier run's partial file, range ignored, give up but keep the partial. Full
+    `pytest -q` 118 passed.
+  - The kept smoke 2026Q1 zip is hard-linked into `local/full/downloads/` (no extra
+    disk), so the full run reuses it instead of downloading 1.3 GB again.
 
 ## Next
-- **Restart the full pass 1** with audit v2 (after merging this branch into main):
-  `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m diskctx run --config configs/full.yaml
-  --stages sources,audit,select`. The 8 finished v1 quarters rerun automatically.
+- **Resume the full pass 1** (finished quarters are skipped; the bad 2023Q1 file is
+  replaced automatically): `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m diskctx run
+  --config configs/full.yaml --stages sources,audit,select`.
 - **M3** — labels and splits (requirements below).
 
 ## M2 requirements (decided 2026-10-27)
