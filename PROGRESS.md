@@ -459,6 +459,24 @@ looking at results. Every test cell has at least 60 failed drives (900 pooled in
   - Experiment B (Study P) passes if the paired bootstrap CI of the FAR reduction, S vs
     S+W+N+P, excludes 0 on at least 2 of 3 horizons.
   - Secondary (Study W): the same test for S vs S+W+N.
+- **Addendum (2026-10-28): operating points** (git tag `criteria-frozen`; the lines
+  above are unchanged).
+  - Primary operating point: 50% drive-level recall. 70% is reported but does not count
+    for pass/fail.
+  - Experiment A: XGBoost-S's threshold is set per model on val at 50% recall. On test,
+    its false alarms are compared with all healthy drive-days: relative risk per
+    workload decile and per pod condition. A passes if the 95% CI excludes 1 for at
+    least one model at the 50% threshold.
+  - Experiment B (Study P): FAR at exactly 50% drive-level recall on test, i.e. the
+    point on each model's test FAR-recall curve. That is a property of the score
+    ranking, not a tuned threshold. Pooled FAR = false-alarm healthy test drives ÷ all
+    healthy test drives, using each model's own 50%-recall point. B passes if the paired
+    bootstrap 95% CI of FAR(S) − FAR(S+W+N+P) excludes 0 on at least 2 of 3 horizons.
+  - Deployment view, reported but not a criterion: thresholds set on val, applied to
+    test, with the resulting test recall and FAR.
+  - Bootstrap: 2,000 paired resamples of drives, stratified by model, the same
+    resamples for both feature sets, percentile 95% CI, fixed seed.
+  - The Study W secondary test (S vs S+W+N) uses the same rules as B.
 
 ## M2 requirements (decided 2026-10-27)
 - Full 2016–2026 range must run on free Colab; never shrink the range to fit Drive.
