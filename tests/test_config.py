@@ -105,3 +105,39 @@ def test_quarter_days():
     assert (q1[0].isoformat(), q1[-1].isoformat(), len(q1)) == ("2026-01-01", "2026-03-31", 90)
     assert len(quarter_days("2024Q1")) == 91  # leap year
     assert quarter_days("2025Q4")[-1].isoformat() == "2025-12-31"
+
+
+# --- splits and studies (M3) -----------------------------------------------------------
+
+
+def test_split_shares_must_sum_to_one(cfg):
+    bad = dict(cfg, splits=dict(cfg["splits"], shares={"train": 0.5, "val": 0.2, "test": 0.2}))
+    with pytest.raises(ConfigError, match="sum to 1"):
+        check_config(bad)
+
+
+def test_min_failed_drives_needs_every_split(cfg):
+    bad = dict(cfg, splits=dict(cfg["splits"], min_failed_drives={"train": 30, "val": 1}))
+    with pytest.raises(ConfigError, match="min_failed_drives"):
+        check_config(bad)
+
+
+def test_study_groups_and_windows_are_checked(cfg):
+    studies = dict(cfg["studies"], W=dict(cfg["studies"]["W"], groups=["S", "X"]))
+    with pytest.raises(ConfigError, match="groups"):
+        check_config(dict(cfg, studies=studies))
+    p = dict(cfg["studies"]["P"], val=["2026-01-20", "2026-02-20"])          # overlaps train
+    with pytest.raises(ConfigError, match="P"):
+        check_config(dict(cfg, studies=dict(cfg["studies"], P=p)))
+    w = dict(cfg["studies"]["W"], models={"SYNTH HDD14TEY": ["2026Q2", "2026Q1"]})
+    with pytest.raises(ConfigError, match="W"):
+        check_config(dict(cfg, studies=dict(cfg["studies"], W=w)))
+
+
+def test_full_config_studies():
+    cfg = load_config(CONFIGS / "full.yaml")
+    assert cfg["splits"]["shares"] == {"train": 0.5, "val": 0.2, "test": 0.3}
+    assert cfg["splits"]["min_failed_drives"] == {"train": 30, "val": 1, "test": 1}
+    assert set(cfg["studies"]["W"]["models"]) == set(cfg["models"])
+    assert str(cfg["studies"]["P"]["train"][0]) == "2023-08-01"
+    assert str(cfg["studies"]["P"]["test"][1]) == "2026-06-30"

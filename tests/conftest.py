@@ -31,6 +31,14 @@ def cfg(tmp_path):
             "default_day_bytes": 100,
             "default_parquet_bytes": 200,
         },
+        "splits": {"shares": {"train": 0.5, "val": 0.2, "test": 0.3}, "healthy_per_failed": 20,
+                   "min_failed_drives": {"train": 1, "val": 1, "test": 1}, "min_test_failures": 50},
+        "studies": {
+            "W": {"groups": ["S", "W", "N"], "val_quarters": 1, "test_quarters": 1,
+                  "min_quarter_failures": 1, "models": {}},
+            "P": {"groups": ["S", "W", "N", "P"], "start": "2026-01-01", "train": ["2026-01-08", "2026-02-10"],
+                  "val": ["2026-02-11", "2026-03-01"], "test": ["2026-03-02", "2026-03-31"]},
+        },
     }
     check_config(c)
     return c

@@ -215,11 +215,115 @@
     its link after use).
   - Full `pytest -q` 120 passed.
 
+- **M3 (2026-10-28)** — `labels`, `splits`, pipeline stages `labels` and `splits`
+  (`python -m diskctx run --config ... --stages labels,splits`).
+  - `labels` stage → `labels/drives.parquet` (one row per model × serial: first and last
+    record, failure date = first event, events, failure-day rows, rows after the
+    failure), `report.csv` (per model × horizon: samples, positives, negatives,
+    censored rows, plus drive counts) and `reappeared.csv`. `label_rows()` adds
+    `y_<N>` (1 / 0 / null) and drops the failure-day row and every later row. Labels use
+    calendar dates; failure dates come only from `events.parquet`, matched on
+    (model, serial). Keys: `horizons`, `data_source`; deps: every `audit_*` and
+    `ingest_*` stage (the audit stages are in the chain even with a model allowlist,
+    because the events come from pass 1; finished ones are skipped).
+  - `splits` stage → `splits/<study>/drives.parquet` (split, by = failure | hash,
+    weight, keep), `windows.csv`, `summary.csv`; prints failing drives per study, model
+    and split and warns for test cells under `min_test_failures`. Keys: `seed`,
+    `splits`, `studies`; dep: `labels`.
+  - A model enters a study only with ≥ 30 failed drives in train and ≥ 1 in val and in
+    test (`splits.min_failed_drives`, Harsh). Otherwise it is left out of that study
+    entirely (no drives in `drives.parquet`, a `skipped` row in `windows.csv`) and
+    `summary.csv` lists it with `included = false` and the reason. `summary.csv` lists
+    every model of a study, also those skipped for their window. No model trains on
+    healthy drives only.
+  - Config: `splits` (shares 50/20/30, `healthy_per_failed` 20, `min_failed_drives`
+    30/1/1, `min_test_failures` 50)
+    and `studies` (W: per-model S/W/N quarters from `audit/summary.csv`, 2 val + 2 test
+    quarters, `min_quarter_failures` 10; P: 2023-07-01 start, train 2023-08-01–2025-03-31,
+    val 2025-04-01–2025-09-30, test 2025-10-01–2026-06-30). Only these keys were added to
+    `full.yaml`; models and ingest/audit keys are unchanged. `smoke.yaml` has Study P
+    only, with short windows in 2026Q1 (plumbing, never a result).
+  - `split_rows()` gives the drive-days of one split and horizon: rows inside the drive's
+    split window only; a label must be decidable by the window end (the drive fails
+    inside the window, or label 0 with t+N ≤ its last record up to the window end);
+    train and val embargo t+N > window end. The rows never depend on the feature set
+    (`S+P` in Study W raises).
+  - CLAUDE.md updated (Harsh): failed-in-window drives go to the split of their failure
+    date, others by seeded hash; embargo per horizon N; censoring per window.
+  - Tests (test_labels 9, test_splits 16, test_config +4): gaps; failure on t+N vs
+    t+N+1; failure-day row excluded; rows after a failure dropped, reappearing serial not
+    merged; censored tails; failure dates only from events; no serial in two splits;
+    failed drives in the split of their failure date (failures in every split); hash
+    shares and seed; downsampling train only, by drive, seeded; failure summary warns
+    < 50; a model short of failed drives in any split is left out with its reason; weighted precision on the test split = precision on the whole population (and
+    unweighted is inflated); rows only inside the split window; embargo removes exactly
+    the crossing days and test is not embargoed; cutting data at the train end leaves
+    train rows and labels identical (incl. a gap across the train end); identical rows
+    for every feature set; synthetic end-to-end runs; changing horizons reruns labels,
+    splits and a downstream stage only. `test_cli` moved-root test now runs all stages.
+  - Done-check: `pytest -q tests/test_labels.py tests/test_splits.py` 23 passed.
+    Full `pytest -q` 147 passed.
+- **Operator-action leak check (2026-10-28, read-only; a check of the data, not a
+  result; for the paper's data-quality section).** Reproducible scripts in
+  `tools/diagnostics/` (paths from the config or arguments; `--help` on each), tables in
+  `results/diagnostics/`, rerun 2026-10-28 with the same numbers as below (the 8-day
+  move share in (a) came from the first run only):
+  `pod_moves.py` (a; also writes `pod_model_days_<Q>.csv`), `hot_pods.py` (b, raw and
+  model-adjusted), `model_spike.py` (c). Run with `DISKCTX_LOCAL_ROOT=~/diskctx_data
+  python tools/diagnostics/<script> --config configs/full.yaml`, (a) first.
+  - **Findings:** no pod moves before failure; no quarantine pods; MG08ACA16TEY's 2025Q3
+    spike is spread over 111 pods, but 96% sits in 8 vaults of ams5|031 (a vault-group
+    event).
+  - **(a) pod_key moves before failure, 2026Q1 zip (all non-boot models, 30.2 M rows).**
+    0 moves for the 1,030 failing drives in any period: f-7..f-1 (923 drives, 5,835
+    drive-days), failure day, f-30..f-8, or earlier. Healthy drives: 26 moves in 29.9 M
+    drive-days (0.009 per 10k; 25 drives), 24 to another vault, all after a gap of ≥ 1
+    day; 8 of them on 2026-03-31. Share of drives with a move in 8 days: failing (f-7..f)
+    0%, healthy (last 8 days of the quarter) 0.003%. **Not elevated.** Failing drives are
+    not moved to another pod before they fail in 2026Q1. One quarter only; a move across
+    a quarter boundary is not seen.
+  - **(b) Pods and vaults by failures per drive-day, pod_days 2023Q3–2026Q2.** 7,000
+    pods, 352 vaults, 322.6 M drive-days, 13,257 failures (4.11 per 100k drive-days, AFR
+    1.50%). Extreme = rate ≥ 3× the fleet and Poisson p < 0.001 / units (Bonferroni):
+    35 pods (631 failures, 4.8%, in 0.7% of drive-days) and 14 vaults (2,381 failures,
+    18%, in 4.7% of drive-days). Top vaults: sac2|000|1124 (273 failures, 5.1×),
+    sac0|000|1022 (5.6×, only 398 days), sac0|000|1128 (4.3×), sac2|000|1156 (3.8×).
+    Top pods: sac2|000|1124|08 (28 failures, 10.4×), sac2|000|1124|11, phx1|000|1066|19
+    (9.3×). These are full pods (~60 drives, ~1,090 days); no pod averages < 20 drives,
+    so there is no small spare/quarantine-pod signature.
+    Model-adjusted (2026Q1 rows from (a), expected = Σ drive-days × the model's rate):
+    extreme vaults drop from 6 (raw) to 2 and pods from 3 to 1. sac2|000|1124 falls from
+    7.2× raw to 2.5× (model mix). Still extreme: sac2|000|1133 (16 failures vs 3.1
+    expected, 5.2×), sac2|020|3018 (a small vault: 6,765 drive-days, 5 vs 0.2; two pods
+    of ~4 drives each with 2 failures, the closest thing to a spare-pod pattern), pod
+    phx1|000|1057|16 (8 vs 0.3). **Raw extremes are mostly model mix; a few hot units
+    remain.**
+  - **(c) MG08ACA16TEY 2025Q3 (215 failures).** Per quarter since 2023Q3: 18, 39, 10,
+    22, 32, 18, 19, 33, **215**, 51, 26, 46. The model lives only in ams5|031 (2026Q1:
+    4,885 drives in vaults 2004–2021). 2025Q3 failures are in 12 vaults and 111 pods,
+    no null pod_key. By vault: 2005 33, 2007 31, 2020 30, 2004 28, 2008 23, 2017 22,
+    2009 21, 2019 19 (these 8 = 96%), then 2015 5, 2010/2018/2014 1 each, 2016 0, though
+    2016 has 510 of the model's drives and 2010/2014/2015/2018 have another ~1,100. By
+    pod: max 5 per pod, the top 10 pods hold 42 (20%), 50 pods have exactly 1. By week:
+    every week of the quarter, 1–31 per week, peaks in the weeks of 07-28 (25), 08-11 (31)
+    and 09-22 (31); the worst day is 08-12 with 14. The same 8 vaults had 0–8 per quarter
+    before and 0–14 after. **Not a few pods: spread evenly across pods and weeks, but
+    concentrated in 8 of the model's ~13 main vaults.** That looks like a vault-group
+    event (a batch, firmware, environment, or a replacement campaign), not a single bad
+    pod.
+  - **Decision (Harsh):** pod_key from before any move; no static hot-pod flag; rolling
+    past-only pod/vault/cluster failure counts plus model-mix "excess" versions (see M4
+    requirements). MG08ACA16TEY's spike falls in Study P's val window, so pooled results
+    are reported with and without it (M5).
+
 ## Next
 - **Pass 2** (Harsh runs it in a separate terminal; all 42 quarters, ~32 GB downloaded
   one at a time, ~6 GB Parquet kept): `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m
   diskctx run --config configs/full.yaml --stages ingest`.
-- **M3** — labels and splits (requirements below).
+- After pass 2: run `--stages labels,splits` on the full data and record the per-study
+  failure counts and the models left out (expect Study W windows to change only by the
+  10-failure rule). This is also the real-data test of the Study W path before M7.
+- **M4** — features S/W/N/P (requirements below).
 
 ## M2 requirements (decided 2026-10-27)
 - Full 2016–2026 range must run on free Colab; never shrink the range to fit Drive.
@@ -252,6 +356,23 @@
   train, val and test. Add a test.
 - Daily TB deltas across quarters use the carried end state (see audit v2). M4 features
   for the selected models need the same rule over the pass-2 Parquet.
+- Decided 2026-10-28 (Harsh), as built: label y_N = 1 if the failure date is in
+  (t, t+N] by calendar date; a drive with no failure keeps negatives only up to N days
+  before its last record (per split: its last record up to the window end); rows after
+  the first failure dropped and counted, reappearing serials reported, not merged.
+- Studies: W (S/W/N) per model from the start of its S/W/N window to its last quarter
+  with ≥ 10 failures (reported in windows.csv), last 2 quarters test, 2 before val;
+  P (all groups) fixed dates, only models with failures in the test window. Every
+  feature set of a study is evaluated on the same drive-days.
+- Assignment: a drive that fails inside a split window goes to that split; others by
+  seeded hash (50/20/30). A drive contributes only rows inside its split window.
+  Embargo per horizon N on train and val. Healthy drives downsampled 1:20 by drive,
+  train only.
+- A model enters a study only if it has ≥ 30 failed drives in train and ≥ 1 in val and
+  in test; otherwise it is excluded from that study entirely and listed in
+  `summary.csv` with the reason. No healthy-only training cells (Harsh, 2026-10-28).
+- Smoke has no Study W (one quarter can't hold train, val and test); that is fine. The
+  W path is tested on real data locally before M7 (Harsh, 2026-10-28).
 
 ## M4 requirements (decided 2026-10-27)
 - Slot: use the last slot seen on a day ≤ t-1. Never use slot missingness as a feature.
@@ -260,13 +381,34 @@
   197) must also use the last value seen on a day ≤ t-1. Add a leakage test.
 - Pod features come from `pod_days.parquet` (whole pod, all non-boot models), lagged to
   ≤ t-1; pod failure counts exclude the drive itself.
+- A workload delta between two rows (Δ241/Δ242) is divided by the calendar days between
+  them, so a gap in a drive's history gives a per-day rate, not a lump (Harsh,
+  2026-10-28).
+- Pod features (Harsh, 2026-10-28, after the operator-action leak check in Done):
+  - Use the drive's pod_key from before any move (see Open questions for the exact rule).
+  - No static hot-pod flag as a feature. Instead rolling, past-only context: failures in
+    the same pod, vault and cluster (datacenter|cluster_id) over the 30 days ending t-1,
+    the drive itself excluded.
+  - Also an "excess" version of each: observed failures ÷ the count expected from the
+    unit's model mix (Σ drive-days × the model's base rate), with per-model base rates
+    from the train window only. Check (b) showed raw hot pods mostly vanish after
+    model-mix adjustment, so a raw count would mostly re-learn the model.
+  - For Experiment A, hot pods may be listed, using train-window data only.
 
 ## M5 requirements (decided 2026-10-28)
 - TOSHIBA MG08ACA16TEY has 215 failures in 2025Q3 (its other quarters since 2023Q3:
   10–51), inside Study P's validation window. Choose alarm thresholds per model, and
   report pooled results both with and without MG08ACA16TEY.
 - ST4000DM000 has no failures after 2024Q3 and no rows after 2025Q1; M3 handles it with
-  per-study windows (Harsh, 2026-10-28).
+  per-study windows (Harsh, 2026-10-28). Its Study W window ends at 2024Q3 (rule: the
+  last quarter with ≥ 10 failures). Its 2024Q4–2025Q1 retirement period may include
+  data-migration reads (high 242 deltas while drives are emptied); that matters for
+  Experiment A (workload deciles), so keep those quarters out of it or report them apart.
+- Splits keep every failure in its own window, so val and test hold all failing drives
+  but only 20% / 30% of healthy drives. FAR and recall are per drive as usual; precision,
+  F1 and MCC must weight healthy drives by 1/share of their split (the `weight` column
+  in `splits/<study>/drives.parquet`) so they reflect the real fleet ratio. Tested:
+  weighted precision on a synthetic test split matches precision on the whole population.
 
 ## Open questions
 - The carried end state is read when a quarter runs; it is not in the stage hash. If an
@@ -278,6 +420,11 @@
 - Several high-failure models lack 241/242 (MG08ACA16TA, HUH721212ALN604,
   MG07ACA14TA). They can't be used for W/N under the current rule; HANDOFF's fallback is
   to pool related models or demote a feature group.
+- M4 pod_key "from before any move": the drive's first pod_key (seen from 2023-07-01),
+  or the pod_key before its latest move, as of t-1? Check (a) found 26 moves in 29.9 M
+  drive-days in 2026Q1 and none for failing drives, so the choice changes few rows.
+- The labels' "last record" is the last pass-2 row; days dropped by the no-SMART row
+  rule do not count as records, so censoring is slightly conservative.
 
 ## TODO
 - Pins were chosen as the latest stable 1.x lines; duckdb 2.0.0 (2026-10-21) and

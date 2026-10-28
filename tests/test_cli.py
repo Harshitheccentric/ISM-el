@@ -7,7 +7,7 @@ import yaml
 
 import diskctx.sources as sources
 from diskctx.__main__ import main
-from diskctx.pipeline import data_stages, run_data
+from diskctx.pipeline import STAGE_GROUPS, data_stages, run_data
 from diskctx.storage import Storage, stage_hashes
 from diskctx.synthetic import SyntheticFleet
 
@@ -62,8 +62,8 @@ def test_moved_root_skips_finished_stages(cfg, tmp_path, fleet_fetch):
     """Markers hold only paths relative to ROOT, so copying ROOT elsewhere (e.g. to Drive)
     keeps every finished stage done, even with a fresh, empty local dir."""
     fetch = fleet_fetch(SyntheticFleet(cfg["seed"], "2026Q1", "2026Q1"))
-    first = run_data(cfg, fetch=fetch)
-    assert [first[s] for s in ("audit_2026Q1", "select", "ingest_2026Q1")] == ["built"] * 3
+    first = run_data(cfg, stages=STAGE_GROUPS, fetch=fetch)
+    assert [first[s] for s in ("audit_2026Q1", "select", "ingest_2026Q1", "labels", "splits")] == ["built"] * 5
 
     for marker in (Storage.from_config(cfg).marker_dir).iterdir():
         text = marker.read_text()
@@ -77,5 +77,5 @@ def test_moved_root_skips_finished_stages(cfg, tmp_path, fleet_fetch):
     stages = data_stages(moved)
     hashes = stage_hashes(stages, moved)
     assert {storage.stage_state(s, hashes[s.name]) for s in stages} == {"done"}
-    assert set(run_data(moved, fetch=fetch).values()) == {"skipped"}
+    assert set(run_data(moved, stages=STAGE_GROUPS, fetch=fetch).values()) == {"skipped"}
     assert fetch.calls == ["2026Q1", "2026Q1"]            # pass 1 + pass 2, never again

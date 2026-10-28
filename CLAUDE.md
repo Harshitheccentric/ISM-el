@@ -68,13 +68,16 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
   Synthetic runs write under `ROOT/_synthetic/`; reporting code refuses them.
 
 ## Splits and leakage
-- Failed drives go to the split whose time window contains their failure date;
-  never-failed drives are assigned by seeded hash. A serial appears in one split only.
+- Per study and model: a drive that fails inside a split window goes to that split;
+  every other drive goes by seeded hash (config shares). A serial appears in one split
+  only. M5 weights healthy drives by 1/share of their split for precision, F1 and MCC.
 - The failure-day row is the event, not a sample: samples are days t strictly before
   the failure date; the failure-day row is in no split.
 - Columns whose missingness rises before failure (slot, SMART 5/9/194/197/198) use the
   last value seen ≤ t-1.
-- Purge gap of max(horizon) days at each window end.
+- Embargo per horizon N: drop train and val drive-days whose (t, t+N] crosses the
+  window end. Censoring is per window: a negative needs t+N <= the drive's last record
+  up to the window end.
 - Compute features on full drive history, then cut to the split window (warm-up).
 - Downsample healthy drives by drive, on train only.
 

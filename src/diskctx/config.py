@@ -34,6 +34,8 @@ REQUIRED_KEYS = (
     "smart_ids",
     "selection",
     "budget",
+    "splits",
+    "studies",
 )
 
 SELECTION_KEYS = ("min_failures", "min_coverage", "max_models", "boot_share")
@@ -44,6 +46,13 @@ BUDGET_KEYS = (
     "default_day_bytes",
     "default_parquet_bytes",
 )
+
+SPLITS = ("train", "val", "test")
+GROUPS = ("S", "W", "N", "P")          # feature groups: SMART, workload, normalized, pod
+STUDIES = ("W", "P")
+SPLITS_KEYS = ("shares", "healthy_per_failed", "min_failed_drives", "min_test_failures")
+W_KEYS = ("groups", "val_quarters", "test_quarters", "min_quarter_failures", "models")
+P_KEYS = ("groups", "start", *SPLITS)
 
 QUARTER_RE = re.compile(r"^(\d{4})Q([1-4])$")
 
@@ -99,6 +108,62 @@ def check_config(cfg):
     missing_budget = [k for k in BUDGET_KEYS if k not in cfg["budget"]]
     if missing_budget:
         raise ConfigError(f"budget is missing keys: {missing_budget}")
+    check_splits(cfg["splits"])
+    check_studies(cfg["studies"])
+
+
+def check_splits(splits):
+    missing = [k for k in SPLITS_KEYS if k not in splits]
+    if missing:
+        raise ConfigError(f"splits is missing keys: {missing}")
+    shares = splits["shares"]
+    if set(shares) != set(SPLITS) or not all(v > 0 for v in shares.values()):
+        raise ConfigError(f"splits.shares needs positive train, val and test, got {shares!r}")
+    if abs(sum(shares.values()) - 1) > 1e-9:
+        raise ConfigError(f"splits.shares must sum to 1, got {shares!r}")
+    if not isinstance(splits["healthy_per_failed"], int) or splits["healthy_per_failed"] < 1:
+        raise ConfigError("splits.healthy_per_failed must be a positive integer")
+    need = splits["min_failed_drives"]
+    if set(need) != set(SPLITS) or not all(isinstance(v, int) and v >= 0 for v in need.values()):
+        raise ConfigError(f"splits.min_failed_drives needs non-negative integers for train, val and test, "
+                          f"got {need!r}")
+    if not isinstance(splits["min_test_failures"], int) or splits["min_test_failures"] < 0:
+        raise ConfigError("splits.min_test_failures must be a non-negative integer")
+
+
+def check_studies(studies):
+    """W: per model [first quarter, last quarter]; P: fixed dates. Both are optional."""
+    unknown = [k for k in studies if k not in STUDIES]
+    if unknown:
+        raise ConfigError(f"unknown studies {unknown}; choose from {STUDIES}")
+    for name, study in studies.items():
+        keys = W_KEYS if name == "W" else P_KEYS
+        missing = [k for k in keys if k not in study]
+        if missing:
+            raise ConfigError(f"study {name} is missing keys: {missing}")
+        groups = study["groups"]
+        if "S" not in groups or not set(groups) <= set(GROUPS):
+            raise ConfigError(f"study {name} groups must include S and come from {GROUPS}, got {groups!r}")
+    if "W" in studies:
+        w = studies["W"]
+        for k in ("val_quarters", "test_quarters"):
+            if not isinstance(w[k], int) or w[k] < 1:
+                raise ConfigError(f"study W {k} must be a positive integer")
+        for model, span in w["models"].items():
+            if len(span) != 2 or parse_quarter(span[0]) > parse_quarter(span[1]):
+                raise ConfigError(f"study W window for {model} must be [first, last] quarter, got {span!r}")
+    if "P" in studies:
+        p = studies["P"]
+        windows = [[parse_date(d) for d in p[s]] for s in SPLITS]
+        if parse_date(p["start"]) > windows[0][0] or any(a > b for a, b in windows):
+            raise ConfigError(f"study P windows must start after its start date and run forward: {p!r}")
+        if not (windows[0][1] < windows[1][0] and windows[1][1] < windows[2][0]):
+            raise ConfigError(f"study P train, val and test windows must not overlap: {p!r}")
+
+
+def parse_date(value):
+    """A YAML date (date object) or 'YYYY-MM-DD' text -> date."""
+    return value if isinstance(value, date) else date.fromisoformat(str(value))
 
 
 def parse_quarter(text):

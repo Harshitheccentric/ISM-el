@@ -1,0 +1,6 @@
+period,drives,drive_days,moves,moves_per_10k_days,drives_moved,moves_same_vault,moves_other_vault,moves_after_gap
+failing: before f-30,681,18656,0,0.0,0,0,0,0
+failing: day f,1030,1005,0,0.0,0,0,0,0
+failing: f-30..f-8,926,16627,0,0.0,0,0,0,0
+failing: f-7..f-1,923,5835,0,0.0,0,0,0,0
+healthy,346052,29854096,26,0.0087,25,2,24,26
