@@ -316,13 +316,105 @@
     requirements). MG08ACA16TEY's spike falls in Study P's val window, so pooled results
     are reported with and without it (M5).
 
+- **Pass 2 complete (2026-10-28, Harsh).** All 42 quarters, 6 models: 252 Parquet files,
+  223.9 M rows, 5,310,811,337 bytes (5.31 GB) in `root/full/parquet`. Largest quarter
+  2023Q3 (168.2 MB), then 2021Q4 (163.1 MB) and 2022Q2 (162.3 MB). Durable `root/full`
+  also holds audit 218 MB, labels 0.7 MB, splits 0.7 MB. Largest zip 2026Q2 (2.09 GB);
+  largest day CSV 2026-06-21 (140 MB).
+  - Why 2026Q2's zip is 2.09 GB while 2026Q1's is 1.31 GB: the CSVs are the same size
+    (12.6 vs 12.0 GB unpacked, same 180 columns, same deflate settings), but 2026Q2's
+    rows are in no order (a model change on 93% of consecutive rows) while 2026Q1's are
+    sorted by model and serial, so deflate packs them worse (ratio 0.167 vs 0.11). Read
+    from the zips' central directories and first day files by HTTP range requests.
+- **Copied day file 2022-12-10.csv (2026-10-28).** All 235,623 rows of `2022-12-10.csv`
+  are dated 2022-12-11, and `2022-12-11.csv` exists. SMART 9 (power-on hours) per drive:
+  2022-12-09 → file 12-10 +47 h median (two days), file 12-10 → 12-11 0 h for all
+  235,212 drives, 12-07 → file 12-10 +95 h (four days). Ignoring the date column, the
+  file equals `2022-12-11.csv` except 8 rows whose failure flag is 0 there and 1 on
+  12-11. So it is a copy of Dec 11's snapshot; Dec 10 itself is missing.
+  - Rule applied (Harsh): a copied day file is dropped and the day counts as missing.
+    New config key `dropped_days: {day: evidence}` (full.yaml has 2022-12-10 with the
+    evidence above; smoke `{}`). `rawzip.day_members(zip, drop)` leaves those files out
+    (a listed day missing from the zip is an error); the audit records `day_dropped` in
+    quality.csv and ingest records `days_dropped` in its marker. A quarter's audit and
+    ingest stages get the dropped days as a param only when it has some, so only that
+    quarter's stages rerun (tested). With no yesterday, Dec 11's daily TB is null.
+  - Rerun: audit_2022Q4, audit_2023Q1 (marker deleted, carried state) and ingest_2022Q4,
+    then labels and splits. 2022Q4 events.parquet and end_state.parquet are byte-for-byte
+    the same as before (the copy had no failure flags); days.csv, models.csv and
+    quality.csv lose Dec 10. 2023Q1's outputs are identical except quality.csv, which
+    now has the date checks (it was audited before them). Each model's 2022Q4 Parquet =
+    the old file minus its 12-10 rows. Status: 2022Q4 date_not_file_day 0 (2019Q2 keeps
+    its 1 row).
+  - Check over all 42 quarters (events vs Parquet, the 6 models): no Parquet date outside
+    its quarter; every event date is a Parquet day; every event with SMART has a
+    failure=1 row on its date and every failure=1 row has an event. Days missing from
+    the Parquet: 2022-12-10 (dropped) and 2017-01-28..31 (see Open questions).
+  - Tests: dropped day left out and must exist in the zip; dropped day is a missing day
+    in audit (days, events, pod_days, null TB delta, quality) and ingest; only that
+    quarter's stage hashes change; config check. Full `pytest -q` 151 passed.
+- **Labels and splits on the full data (2026-10-28).** Study settings unchanged.
+  - labels/report.csv totals (6 models): 99,819 drives, 12,801 failed; 12,716
+    failure-day rows and 104,944 rows after a failure dropped (104,855 after the four
+    more copied days below were dropped); 236 reappeared serials (`reappeared.csv`);
+    0 events without rows. (85 failures have no failure-day row:
+    their row had no SMART and was dropped by the row rule; the event is kept.)
+  - Study W windows as the 10-failure rule predicts: ST4000DM000 ends 2024Q3 (train
+    2016-01-01–2023-09-30, val 2023Q4–2024Q1, test 2024Q2–Q3); the other five end
+    2026Q2 (val 2025Q3–Q4, test 2026Q1–Q2). Study P: ST4000DM000 skipped (no failures in
+    the test window); the other five in.
+  - Failed drives per split (train / val / test), every model included, no test cell
+    < 50 (lowest: ST14000NM001G W test 60):
+
+    | model | W | P |
+    |---|---|---|
+    | ST4000DM000 | 4,685 / 156 / 78 | skipped |
+    | ST12000NM0008 | 2,093 / 243 / 274 | 840 / 270 / 385 |
+    | ST8000NM0055 | 2,255 / 107 / 151 | 623 / 126 / 205 |
+    | ST8000DM002 | 1,288 / 65 / 63 | 301 / 67 / 101 |
+    | ST14000NM001G | 663 / 71 / 60 | 305 / 71 / 93 |
+    | TOSHIBA MG08ACA16TEY | 225 / 253 / 71 | 157 / 239 / 116 |
+
+- **Four more copied day files dropped (2026-10-28, Harsh).** A copy holds the next
+  day's data under an earlier date, so a feature for day D+1 built from "yesterday"
+  would see D+1 itself and break the t-1 rule.
+  - `tools/diagnostics/copied_days.py` (reads the pass-2 Parquet, no downloads) flags
+    every day D on which ≥ 99% of drives' SMART 9 did not advance since D-1 and says
+    which file is the copy from the neighbours (D-2 → D-1 about +48 h and D → D+1 about
+    +24 h: D-1 is a copy of D, i.e. it matches the next day). Days already in
+    `dropped_days` are listed with their evidence. Table:
+    `results/diagnostics/copied_days.csv`. Of 3,829 days, 5 were flagged (share
+    unchanged 1.000; every other day ≤ 0.022): 2017-12-31, 2019-08-26, 2019-10-15 and
+    2021-07-01, each a copy of the next day (+48 h before, +24 h after, failure flags 0
+    in the copy, ≥ 99.99% of rows identical to the next day's file), and 2017-01-27
+    (unclear, see Open questions).
+  - The four are in `dropped_days` with their evidence. Reran audit and ingest for
+    2017Q4, 2019Q3, 2019Q4, 2021Q3, audit 2018Q1 (marker deleted; carried state), then
+    labels and splits. Events are identical in all five quarters; each Parquet = the old
+    file minus the dropped day; end states identical except 2017Q4's, which now comes
+    from 2017-12-30 (93,240 drives instead of the copy's 92,966). Events vs Parquet
+    agree on every date in these quarters. splits/summary.csv is unchanged in every cell
+    (drives, failed drives, kept healthy). The scan now flags only 2017-01-27.
+- **Late January 2017, from the 2017Q1 zip (read-only, all 52 models).**
+  - 2017-01-26 and 2017-01-27 hold one snapshot: SMART 9 01-25 → 01-26 is +17 h for
+    every model (01-24 → 01-25 is +24 h), 01-26 → 01-27 is 0 h, 01-27 → 02-01 +150 h.
+    So the snapshot is +17 h, not +48 h: it belongs to 01-26 (taken early), not 01-27.
+    73,585 of 73,699 rows of 01-27 equal 01-26's; 91 drives (45 HGST HMS5C4040BLE640,
+    45 HMS5C4040ALE640, 1 ST500LM012 HN) have a newer reading on 01-27 (+22 to +30 h);
+    01-27 also carries 22 failure flags (01-26: 0). Not changed: Harsh decides (Open
+    questions).
+  - Small files: 2017-01-28 (46 rows: 45 of the HMS5C4040BLE640 drives above + 1) is
+    +18 h after 01-27, a normal step. 2017-01-29 (the same 46 drives) is 0 h after 01-28:
+    a copy of 01-28. 2017-01-30 has no file. 2017-01-31 (61 rows, 60 Hitachi
+    HDS722020ALA330 + 1) holds drives not seen on 01-25..01-29; they step +30 h to
+    02-01. None of these drives is one of the 6 pass-2 models, so they touch only the
+    audit tables.
+  - Of the 72,420 non-boot drives present on 01-27, 0 are missing on 02-01 without a
+    failure event: nobody disappears across the gap.
+
 ## Next
-- **Pass 2** (Harsh runs it in a separate terminal; all 42 quarters, ~32 GB downloaded
-  one at a time, ~6 GB Parquet kept): `DISKCTX_LOCAL_ROOT=~/diskctx_data python -m
-  diskctx run --config configs/full.yaml --stages ingest`.
-- After pass 2: run `--stages labels,splits` on the full data and record the per-study
-  failure counts and the models left out (expect Study W windows to change only by the
-  10-failure rule). This is also the real-data test of the Study W path before M7.
+- Harsh: decide the study settings from the labels/splits table (Done), and January
+  2017 (Open questions).
 - **M4** — features S/W/N/P (requirements below).
 
 ## M2 requirements (decided 2026-10-27)
@@ -411,6 +503,12 @@
   weighted precision on a synthetic test split matches precision on the whole population.
 
 ## Open questions
+- **January 2017** (details in Done). The shared 01-26/01-27 snapshot is +17 h after
+  01-25, so by the SMART 9 rule it belongs to 01-26 and the 01-27 file is (mostly) a
+  copy of it, holding 22 failure flags and 91 newer readings. Options: drop 01-27 (its
+  22 failure events would then need another home, since events come from the raw rows),
+  or keep both and accept one stale day. Also 2017-01-29 is a copy of 01-28 for its 46
+  drives (none in the 6 models): add it to `dropped_days`?
 - The carried end state is read when a quarter runs; it is not in the stage hash. If an
   earlier quarter is re-audited later, the next quarter's day-1 deltas are not redone
   automatically (rerun it by deleting its marker). Pass 1 runs quarters in
@@ -425,6 +523,16 @@
   drive-days in 2026Q1 and none for failing drives, so the choice changes few rows.
 - The labels' "last record" is the last pass-2 row; days dropped by the no-SMART row
   rule do not count as records, so censoring is slightly conservative.
+
+## Threats to validity
+- **Failure labels.** 236 serials keep reporting after their failure flag (104,855 rows
+  after a failure dropped, after the copied days were removed; 104,944 before). So some
+  Backblaze "failures" may be removals or redeployments, not hardware deaths; the
+  label is "Backblaze flagged the drive as failed", and the paper should say so.
+- **Copied day files.** Five day files were copies of the next day and are dropped
+  (`dropped_days`, `results/diagnostics/copied_days.csv`); the copies carried no failure
+  flags, so events are unchanged. The check covers only the 6 pass-2 models and needs
+  SMART 9; a copy in another model's rows would not be seen.
 
 ## TODO
 - Pins were chosen as the latest stable 1.x lines; duckdb 2.0.0 (2026-10-21) and

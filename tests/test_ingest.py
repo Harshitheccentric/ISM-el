@@ -143,7 +143,8 @@ def test_pass2_allowlist_writes_one_file_per_model_per_quarter(cfg, fleet_fetch)
         assert set(t.column("data_source").to_pylist()) == {"synthetic"}
 
     # pass 2 also counts odd row dates over every row of every day file
-    assert storage.read_marker("ingest_2026Q1")["info"] == {"date_unparseable": 0, "date_not_file_day": 0}
+    assert storage.read_marker("ingest_2026Q1")["info"] == {"date_unparseable": 0, "date_not_file_day": 0,
+                                                           "days_dropped": []}
     assert "1 quarters checked, 0 with issues" in status_report(storage, [], cfg)
 
     log = read_download_log(storage)["2026Q1"]

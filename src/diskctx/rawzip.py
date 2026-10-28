@@ -22,8 +22,9 @@ def is_junk(name):
     return any(p == "__MACOSX" or p.startswith(".") for p in parts)
 
 
-def day_members(zip_path):
-    """[(date string, member name)] for every day CSV in the zip, in date order."""
+def day_members(zip_path, drop=()):
+    """[(date string, member name)] for every day CSV in the zip, in date order, without
+    the days in `drop` (config dropped_days; each must be in the zip)."""
     days = {}
     with zipfile.ZipFile(zip_path) as z:
         for info in z.infolist():
@@ -36,7 +37,10 @@ def day_members(zip_path):
             if day in days:
                 raise RawZipError(f"{zip_path}: date {day} appears twice ({days[day]}, {info.filename})")
             days[day] = info.filename
-    return sorted(days.items())
+    absent = [d for d in drop if d not in days]
+    if absent:
+        raise RawZipError(f"{zip_path}: dropped days {absent} are not in the zip")
+    return sorted((d, m) for d, m in days.items() if d not in drop)
 
 
 def extract_member(zip_path, member, dest):

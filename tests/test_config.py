@@ -6,6 +6,7 @@ from diskctx.config import (
     ConfigError,
     check_config,
     config_hash,
+    dropped_days,
     load_config,
     quarter_days,
     quarters_between,
@@ -114,6 +115,15 @@ def test_split_shares_must_sum_to_one(cfg):
     bad = dict(cfg, splits=dict(cfg["splits"], shares={"train": 0.5, "val": 0.2, "test": 0.2}))
     with pytest.raises(ConfigError, match="sum to 1"):
         check_config(bad)
+
+
+def test_dropped_days_need_a_date_and_evidence(cfg):
+    with pytest.raises(ConfigError, match="evidence"):
+        check_config(dict(cfg, dropped_days={"2022-12-10": ""}))
+    with pytest.raises(ConfigError, match="date"):
+        check_config(dict(cfg, dropped_days={"12/10/22": "copy"}))
+    assert dropped_days(dict(cfg, dropped_days={"2022-12-10": "copy"}), "2022Q4") == ["2022-12-10"]
+    assert dropped_days(dict(cfg, dropped_days={"2022-12-10": "copy"}), "2023Q1") == []
 
 
 def test_min_failed_drives_needs_every_split(cfg):

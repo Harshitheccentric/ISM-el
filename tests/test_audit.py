@@ -8,11 +8,11 @@ from datetime import date
 
 import pyarrow.parquet as pq
 import pytest
-from conftest import csv_text
+from conftest import csv_text, write_zip
 
 import diskctx.audit as audit
 from diskctx.audit import read_csv_rows, read_selection, select_models, selection_warning, swn_window
-from diskctx.ingest import read_day
+from diskctx.ingest import ingest_quarter, ingest_stages, read_day
 from diskctx.pipeline import run_data
 from diskctx.storage import stage_hashes
 from diskctx.status import status_report
@@ -394,6 +394,49 @@ def test_file_name_date_wins_and_odd_row_dates_are_counted(cfg, zip_fetch):
     t = read_day(path, cfg["smart_ids"], "synthetic")
     assert {str(d) for d in t.column("date").to_pylist()} == {day}  # every row: the file's day
     assert t.num_rows == 4
+
+
+def test_dropped_day_file_is_treated_as_a_missing_day(cfg, zip_fetch):
+    # Like 2022-12-10.csv: a copy of the next day's file, with that day's dates, failure
+    # flags reset. Dropped by config, the day is missing in the audit and in pass 2.
+    day1 = [lba_row("2026-01-01", f"D{i}", "SYNTH X", 3_000_000_000 + i) for i in range(3)]
+    day3 = [lba_row("2026-01-03", f"D{i}", "SYNTH X", 3_000_100_000 + i, failure="1" if i == 0 else "0")
+            for i in range(3)]
+    copy = [dict(r, failure="0") for r in day3]
+    cfg["dropped_days"] = {"2026-01-02": "copy of 2026-01-03.csv"}
+    storage = run_crafted(cfg, zip_fetch, {"2026-01-01": day1, "2026-01-02": copy, "2026-01-03": day3})
+
+    base = "audit/quarters/2026Q1"
+    assert {r["date"] for r in rows_of(storage, f"{base}/days.csv")} == {"2026-01-01", "2026-01-03"}
+    events = parquet_rows(storage, f"{base}/events.parquet")
+    assert [(e["serial_number"], str(e["date"])) for e in events] == [("D0", "2026-01-03")]
+    quality = {(r["check"], r["column"]): r["count"] for r in rows_of(storage, f"{base}/quality.csv")}
+    assert quality[("day_dropped", "2026-01-02")] == 1
+    assert quality[("date_not_file_day", "date")] == 0
+    pods = tb_by_day(storage, "2026Q1")
+    assert set(pods) == {"2026-01-01", "2026-01-03"}
+    assert pods["2026-01-03"]["tb_written_mean"] is None       # no yesterday: the day is missing
+
+    members = crafted_zip("2026Q1", {"2026-01-01": day1, "2026-01-02": copy, "2026-01-03": day3})
+    zip_path = write_zip(storage.work_dir / "q.zip", members)
+    out = storage.work_dir / "x.parquet"
+    _, unreadable, other_day = ingest_quarter(zip_path, {"SYNTH X": out}, storage.work_dir, cfg["smart_ids"],
+                                              "synthetic", ["2026-01-02"])
+    assert {str(d) for d in pq.read_table(out).column("date").to_pylist()} == {"2026-01-01", "2026-01-03"}
+    assert (unreadable, other_day) == (0, 0)
+
+
+def test_dropped_day_changes_only_its_quarters_stage_hashes(cfg):
+    sources = [{"quarter": q, "url": f"https://x/{q}.zip", "kind": "listed"} for q in ("2025Q4", "2026Q1")]
+
+    def hashes(c):
+        stages = audit.audit_stages(c, sources) + ingest_stages(c, sources, [MODEL_LBA], ["2025Q4", "2026Q1"])
+        return stage_hashes(stages, c)
+
+    before = hashes(cfg)
+    after = hashes({**cfg, "dropped_days": {"2026-01-02": "copy of 2026-01-03.csv"}})
+    changed = {name for name in before if before[name] != after[name]}
+    assert changed == {"audit_2026Q1", "ingest_2026Q1"}
 
 
 def test_status_marks_quarters_audited_before_the_date_check(cfg):

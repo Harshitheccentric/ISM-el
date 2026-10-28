@@ -34,6 +34,7 @@ REQUIRED_KEYS = (
     "smart_ids",
     "selection",
     "budget",
+    "dropped_days",
     "splits",
     "studies",
 )
@@ -108,8 +109,35 @@ def check_config(cfg):
     missing_budget = [k for k in BUDGET_KEYS if k not in cfg["budget"]]
     if missing_budget:
         raise ConfigError(f"budget is missing keys: {missing_budget}")
+    check_dropped_days(cfg["dropped_days"])
     check_splits(cfg["splits"])
     check_studies(cfg["studies"])
+
+
+def check_dropped_days(days):
+    """{day: evidence}: day files left out as a whole (the day counts as missing)."""
+    if not isinstance(days, dict):
+        raise ConfigError("dropped_days must be a mapping {YYYY-MM-DD: evidence} (may be empty)")
+    for day, why in days.items():
+        try:
+            parse_date(day)
+        except ValueError:
+            raise ConfigError(f"dropped_days: {day!r} is not a YYYY-MM-DD date") from None
+        if not isinstance(why, str) or not why.strip():
+            raise ConfigError(f"dropped_days: {day} needs the evidence as text")
+
+
+def dropped_days(cfg, quarter):
+    """The day files of `quarter` that the config leaves out, as 'YYYY-MM-DD' strings."""
+    in_quarter = set(quarter_days(quarter))
+    return sorted(parse_date(d).isoformat() for d in cfg["dropped_days"] if parse_date(d) in in_quarter)
+
+
+def dropped_param(cfg, quarter):
+    """Stage params for a quarter's dropped days. Empty when there are none, so adding a
+    dropped day reruns only its own quarter's stages."""
+    days = dropped_days(cfg, quarter)
+    return {"dropped_days": days} if days else {}
 
 
 def check_splits(splits):

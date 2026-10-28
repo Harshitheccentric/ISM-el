@@ -31,6 +31,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from diskctx.config import dropped_days, dropped_param
 from diskctx.rawzip import day_members, extract_member
 from diskctx.sources import local_zip
 from diskctx.status import check_budget, log_download
@@ -177,12 +178,12 @@ def parquet_path(model, quarter):
     return f"parquet/{model_dir(model)}/{quarter}.parquet"
 
 
-def ingest_quarter(zip_path, out_paths, scratch, smart_ids, data_source):
+def ingest_quarter(zip_path, out_paths, scratch, smart_ids, data_source, drop_days=()):
     """Pass 2 for one quarter: every day CSV in the zip, one at a time -> one zstd
     Parquet per model (out_paths = {model: path}; one row group per day; a model absent
-    that quarter gets a file with 0 rows). Returns (largest day CSV's bytes, rows whose
-    own date is unreadable, rows whose own date is not the file's day), over all rows of
-    every day file."""
+    that quarter gets a file with 0 rows). drop_days: day files left out (config
+    dropped_days). Returns (largest day CSV's bytes, rows whose own date is unreadable,
+    rows whose own date is not the file's day), over all rows of every day file read."""
     if len({model_dir(m) for m in out_paths}) != len(out_paths):
         raise ValueError(f"two models map to the same folder name: {sorted(out_paths)}")
     con = duckdb.connect()
@@ -194,7 +195,7 @@ def ingest_quarter(zip_path, out_paths, scratch, smart_ids, data_source):
             path.parent.mkdir(parents=True, exist_ok=True)
             writers[model] = stack.enter_context(
                 pq.ParquetWriter(path, arrow_schema(smart_ids), compression="zstd"))
-        for day, member in day_members(zip_path):
+        for day, member in day_members(zip_path, drop_days):
             largest = max(largest, extract_member(zip_path, member, day_csv))
             present = load_day(con, day_csv, smart_ids, day)
             bad, other = date_checks(con, present, day)
@@ -223,13 +224,14 @@ def ingest_stages(cfg, sources, models, quarters, fetch=None, keep_zips=False):
             check_budget(storage, quarter, cfg["budget"])
             zip_path = local_zip(storage, url, fetch)
             paths = {m: work / out for m, out in outs.items()}
+            drop = dropped_days(cfg, quarter)
             largest, unreadable, other_day = ingest_quarter(zip_path, paths, work, cfg["smart_ids"],
-                                                            storage.data_source)
+                                                            storage.data_source, drop)
             parquet_bytes = sum(p.stat().st_size for p in paths.values())
             log_download(storage, quarter, zip_path.stat().st_size, largest, parquet_bytes)
             if not keep_zips:
                 zip_path.unlink()
-            return {"date_unparseable": unreadable, "date_not_file_day": other_day}
+            return {"date_unparseable": unreadable, "date_not_file_day": other_day, "days_dropped": drop}
 
         stages.append(Stage(
             name=f"ingest_{quarter}",
@@ -237,6 +239,6 @@ def ingest_stages(cfg, sources, models, quarters, fetch=None, keep_zips=False):
             outputs=list(outs.values()),
             build=build,
             keys=["data_source", "smart_ids"],
-            params={"quarter": quarter, "url": url, "models": sorted(models)},
+            params={"quarter": quarter, "url": url, "models": sorted(models), **dropped_param(cfg, quarter)},
         ))
     return stages

@@ -23,6 +23,8 @@ selection:
   max_models: 3
   boot_share: 0.95            # boot model: this share of rows with empty slot or no SMART
 
+dropped_days: {}              # day files left out as a whole (see full.yaml)
+
 budget:
   margin_bytes: 1000000000    # keep this much free on each disk
   # Estimate per size = max(default, 1.5 x largest measured quarter). Errs high.

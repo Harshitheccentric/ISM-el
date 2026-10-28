@@ -33,6 +33,35 @@ selection:
   max_models: 3
   boot_share: 0.95            # boot model: this share of rows with empty slot or no SMART
 
+# Day files left out as a whole (the day counts as missing), with the evidence. Use this
+# when a file is a copy of another day; a wrong file name would need a date override.
+dropped_days:
+  2017-12-31: >-
+    copy of 2018-01-01.csv (checked 2026-10-28 on the 6 pass-2 models,
+    tools/diagnostics/copied_days.py): SMART 9 equals 2018-01-01.csv for all 56,218 drives and is
+    +48 h (median) after 2017-12-30.csv, while 2018-01-01 -> next day is +24 h; rows (without
+    the date) identical to 2018-01-01.csv for 56,216 of 56,218; failure flags 0 here, 2 there
+  2019-08-26: >-
+    copy of 2019-08-27.csv (checked 2026-10-28 on the 6 pass-2 models,
+    tools/diagnostics/copied_days.py): SMART 9 equals 2019-08-27.csv for all 43,772 drives and is
+    +48 h (median) after 2019-08-25.csv, while 2019-08-27 -> next day is +24 h; rows (without
+    the date) identical to 2019-08-27.csv for 43,772 of 43,772; failure flags 0 here, 0 there
+  2019-10-15: >-
+    copy of 2019-10-16.csv (checked 2026-10-28 on the 6 pass-2 models,
+    tools/diagnostics/copied_days.py): SMART 9 equals 2019-10-16.csv for all 44,746 drives and is
+    +48 h (median) after 2019-10-14.csv, while 2019-10-16 -> next day is +24 h; rows (without
+    the date) identical to 2019-10-16.csv for 44,742 of 44,746; failure flags 0 here, 4 there
+  2021-07-01: >-
+    copy of 2021-07-02.csv (checked 2026-10-28 on the 6 pass-2 models,
+    tools/diagnostics/copied_days.py): SMART 9 equals 2021-07-02.csv for all 73,043 drives and is
+    +48 h (median) after 2021-06-30.csv, while 2021-07-02 -> next day is +24 h; rows (without
+    the date) identical to 2021-07-02.csv for 73,040 of 73,043; failure flags 0 here, 3 there
+  2022-12-10: >-
+    copy of 2022-12-11.csv (checked 2026-10-28): all 235,623 rows are dated 2022-12-11;
+    SMART 9 equals 2022-12-11.csv for all 235,212 drives in both, and is +47 h (median)
+    after 2022-12-09.csv, i.e. two days on; rows identical to 2022-12-11.csv except 8
+    failure flags (0 here, 1 there)
+
 budget:
   margin_bytes: 1000000000    # keep this much free on each disk
   # Estimate per size = max(default, 1.5 x largest measured quarter). Errs high.

@@ -42,3 +42,10 @@ def test_extract_member_copies_one_day(tmp_path):
     assert (tmp_path / "day.csv").read_bytes() == expected
     assert size == len(expected)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["day.csv", "q.zip"]
+
+
+def test_dropped_days_are_left_out_and_must_exist(tmp_path):
+    z = write_zip(tmp_path / "q.zip", {"q/2026-01-01.csv": "a", "q/2026-01-02.csv": "b", "q/2026-01-03.csv": "c"})
+    assert [d for d, _ in day_members(z, drop=["2026-01-02"])] == ["2026-01-01", "2026-01-03"]
+    with pytest.raises(RawZipError, match="2026-01-09"):
+        day_members(z, drop=["2026-01-09"])

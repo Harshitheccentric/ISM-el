@@ -59,7 +59,7 @@ import json
 
 import duckdb
 
-from diskctx.config import previous_quarter, quarters_between
+from diskctx.config import dropped_days, dropped_param, previous_quarter, quarters_between
 from diskctx.ingest import POD_FIELDS, cast_types, date_checks, load_day, q, smart_columns
 from diskctx.rawzip import day_members, extract_member
 from diskctx.sources import local_zip
@@ -194,14 +194,15 @@ def quarter_boot_models(con, boot_share):
 
 
 def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source, boot_share,
-                  prev_state=None):
+                  prev_state=None, drop_days=()):
     """Audit every day CSV of one quarter zip, one day at a time, and write the quarter
     tables into out_dir. prev_state: the previous quarter's end_state.parquet (may not
-    exist). Returns (largest day CSV's bytes, whether the previous end state was used)."""
+    exist). drop_days: day files left out (config dropped_days), recorded in quality.csv.
+    Returns (largest day CSV's bytes, whether the previous end state was used)."""
     missing = [i for i in POD_DAY_SMART if i not in smart_ids]
     if missing:
         raise ValueError(f"smart_ids must include {missing} for the pod-day table")
-    days = day_members(zip_path)
+    days = day_members(zip_path, drop_days)
     if not days:
         raise RuntimeError(f"{zip_path} has no day CSVs")
     con = duckdb.connect()
@@ -215,6 +216,7 @@ def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source, b
         con.execute(f"INSERT INTO state SELECT serial, last_date, smart_241_raw, smart_242_raw "
                     f"FROM read_parquet('{prev_state}')")
     quality = {("previous_end_state", "found"): int(found)}
+    quality.update({("day_dropped", day): 1 for day in drop_days})
 
     day_csv = scratch / "day.csv"
     largest = 0
@@ -295,7 +297,8 @@ def audit_stages(cfg, sources, fetch=None, keep_zips=False):
             prev_quarter = previous_quarter(quarter)
             prev = storage.path(DURABLE, f"audit/quarters/{prev_quarter}/end_state.parquet")
             largest, carried = audit_quarter(zip_path, work / out, work, cfg["smart_ids"], quarter,
-                                             storage.data_source, cfg["selection"]["boot_share"], prev)
+                                             storage.data_source, cfg["selection"]["boot_share"], prev,
+                                             dropped_days(cfg, quarter))
             log_download(storage, quarter, zip_path.stat().st_size, largest, None)
             if not keep_zips:
                 zip_path.unlink()
@@ -308,7 +311,7 @@ def audit_stages(cfg, sources, fetch=None, keep_zips=False):
             build=build,
             keys=["data_source", "smart_ids"],
             params={"version": AUDIT_VERSION, "quarter": quarter, "url": url,
-                    "boot_share": cfg["selection"]["boot_share"]},
+                    "boot_share": cfg["selection"]["boot_share"], **dropped_param(cfg, quarter)},
         ))
     return stages
 
