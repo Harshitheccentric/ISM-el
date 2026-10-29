@@ -2,6 +2,7 @@
 
     python -m diskctx run --config configs/full.yaml --stages sources,audit
     python -m diskctx run --config configs/full.yaml --stages labels,splits
+    python -m diskctx run --config configs/full.yaml --stages features
     python -m diskctx status --config configs/full.yaml
 
 Set DISKCTX_LOCAL_ROOT (e.g. ~/diskctx_data) to keep data outside the repo. Runs are

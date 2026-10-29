@@ -2,8 +2,8 @@
 
 Two tiers:
 - durable: copied to ROOT, survives a Colab reset (audit tables, Parquet, splits,
-  models, results).
-- cache: local disk only, rebuilt when missing (feature tables).
+  features, models, results).
+- cache: local disk only, rebuilt when missing (no stage uses it since M4).
 
 Stage pattern: build into a fresh local work folder -> copy each output to its tier ->
 verify the copy -> write the done-marker LAST. A crash at any point before the marker

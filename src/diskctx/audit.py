@@ -24,6 +24,10 @@ audit_<quarter> stage -> audit/quarters/<quarter>/
                     Keeps vault_key for vault-level counts. Empty if no pod fields.
   end_state.parquet per drive seen on the quarter's last day: its 241/242 counters, so
                     the next quarter's first day gets a daily delta.
+  pod_models.parquet per pod, model and day (non-boot models, the same rule as
+                    pod_days): drives and failures. M4's "excess" pod features need the
+                    model mix. Written only for quarters from Study P's start (stage
+                    param pod_models), so adding it reran only those quarters.
 
 Daily TB = (counter today - counter yesterday) x 512 B / 1e12. The delta is null when the
 drive was not seen yesterday (including when the previous quarter's end state is
@@ -59,7 +63,14 @@ import json
 
 import duckdb
 
-from diskctx.config import dropped_days, dropped_param, previous_quarter, quarters_between
+from diskctx.config import (
+    dropped_days,
+    dropped_param,
+    parse_date,
+    parse_quarter,
+    previous_quarter,
+    quarters_between,
+)
 from diskctx.ingest import POD_FIELDS, cast_types, date_checks, load_day, q, smart_columns
 from diskctx.rawzip import day_members, extract_member
 from diskctx.sources import local_zip
@@ -194,10 +205,11 @@ def quarter_boot_models(con, boot_share):
 
 
 def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source, boot_share,
-                  prev_state=None, drop_days=()):
+                  prev_state=None, drop_days=(), pod_models=False):
     """Audit every day CSV of one quarter zip, one day at a time, and write the quarter
     tables into out_dir. prev_state: the previous quarter's end_state.parquet (may not
     exist). drop_days: day files left out (config dropped_days), recorded in quality.csv.
+    pod_models: also write pod_models.parquet.
     Returns (largest day CSV's bytes, whether the previous end state was used)."""
     missing = [i for i in POD_DAY_SMART if i not in smart_ids]
     if missing:
@@ -266,6 +278,20 @@ def audit_quarter(zip_path, out_dir, scratch, smart_ids, quarter, data_source, b
             ORDER BY date, pod_key
         ) TO '{out_dir / 'pod_days.parquet'}' {parquet}
     """)
+    if pod_models:
+        con.execute(f"""
+            COPY (
+                WITH m AS (
+                    SELECT date, pod_key, model, sum(drives)::BIGINT AS drives
+                    FROM pod_parts WHERE model NOT IN (SELECT model FROM boot) GROUP BY ALL),
+                f AS (
+                    SELECT date, pod_key, model, count(*) AS failures FROM events
+                    WHERE pod_key IS NOT NULL AND model NOT IN (SELECT model FROM boot) GROUP BY ALL)
+                SELECT m.*, coalesce(f.failures, 0) AS failures, {tag}
+                FROM m LEFT JOIN f USING (date, pod_key, model)
+                ORDER BY date, pod_key, model
+            ) TO '{out_dir / 'pod_models.parquet'}' {parquet}
+        """)
     con.execute(f"COPY (SELECT * FROM state WHERE last_date = DATE '{days[-1][0]}' ORDER BY serial) "
                 f"TO '{out_dir / 'end_state.parquet'}' {parquet}")
 
@@ -298,7 +324,7 @@ def audit_stages(cfg, sources, fetch=None, keep_zips=False):
             prev = storage.path(DURABLE, f"audit/quarters/{prev_quarter}/end_state.parquet")
             largest, carried = audit_quarter(zip_path, work / out, work, cfg["smart_ids"], quarter,
                                              storage.data_source, cfg["selection"]["boot_share"], prev,
-                                             dropped_days(cfg, quarter))
+                                             dropped_days(cfg, quarter), bool(pod_models_param(cfg, quarter)))
             log_download(storage, quarter, zip_path.stat().st_size, largest, None)
             if not keep_zips:
                 zip_path.unlink()
@@ -311,9 +337,20 @@ def audit_stages(cfg, sources, fetch=None, keep_zips=False):
             build=build,
             keys=["data_source", "smart_ids"],
             params={"version": AUDIT_VERSION, "quarter": quarter, "url": url,
-                    "boot_share": cfg["selection"]["boot_share"], **dropped_param(cfg, quarter)},
+                    "boot_share": cfg["selection"]["boot_share"], **dropped_param(cfg, quarter),
+                    **pod_models_param(cfg, quarter)},
         ))
     return stages
+
+
+def pod_models_param(cfg, quarter):
+    """{"pod_models": True} for quarters from Study P's start quarter, else {}. Only those
+    quarters write pod_models.parquet, so only their audit stages got a new hash."""
+    if "P" not in cfg["studies"]:
+        return {}
+    start = parse_date(cfg["studies"]["P"]["start"])
+    first = f"{start.year}Q{(start.month - 1) // 3 + 1}"
+    return {"pod_models": True} if parse_quarter(quarter) >= parse_quarter(first) else {}
 
 
 # --- selection -----------------------------------------------------------------------

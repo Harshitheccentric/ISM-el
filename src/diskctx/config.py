@@ -18,8 +18,9 @@ LOCAL_ROOT_ENV = "DISKCTX_LOCAL_ROOT"
 MODES = ("smoke", "full")
 DATA_SOURCES = ("backblaze", "synthetic")
 
-# Keys that only say *where* things go; they never change a result, so they are not hashed.
-PATH_KEYS = ("root", "local_dir")
+# Keys that only say *where* things go or *how much memory* to use; they never change a
+# result, so they are not hashed.
+PATH_KEYS = ("root", "local_dir", "resources")
 
 REQUIRED_KEYS = (
     "mode",
@@ -37,6 +38,8 @@ REQUIRED_KEYS = (
     "dropped_days",
     "splits",
     "studies",
+    "features",
+    "resources",
 )
 
 SELECTION_KEYS = ("min_failures", "min_coverage", "max_models", "boot_share")
@@ -46,7 +49,14 @@ BUDGET_KEYS = (
     "default_zip_bytes",
     "default_day_bytes",
     "default_parquet_bytes",
+    "default_feature_bytes_per_row",
 )
+
+FEATURE_KEYS = ("s_smart_ids", "error_counters", "min_coverage", "windows", "lba_bytes",
+                "fill_phase_max_fills", "n_floor_tb_per_day", "pod_window_days", "excess_smoothing",
+                "train_sample")
+FEATURE_SMART = (9, 194, 241, 242)     # age, temperature, LBAs written / read
+RESOURCE_KEYS = ("duckdb_memory_limit", "duckdb_threads")
 
 SPLITS = ("train", "val", "test")
 GROUPS = ("S", "W", "N", "P")          # feature groups: SMART, workload, normalized, pod
@@ -112,6 +122,10 @@ def check_config(cfg):
     check_dropped_days(cfg["dropped_days"])
     check_splits(cfg["splits"])
     check_studies(cfg["studies"])
+    check_features(cfg["features"], smart_ids)
+    missing_resources = [k for k in RESOURCE_KEYS if k not in cfg["resources"]]
+    if missing_resources:
+        raise ConfigError(f"resources is missing keys: {missing_resources}")
 
 
 def check_dropped_days(days):
@@ -172,6 +186,8 @@ def check_studies(studies):
         groups = study["groups"]
         if "S" not in groups or not set(groups) <= set(GROUPS):
             raise ConfigError(f"study {name} groups must include S and come from {GROUPS}, got {groups!r}")
+        if name == "W" and "P" in groups:
+            raise ConfigError("study W has no pod features: its groups must not include P")
     if "W" in studies:
         w = studies["W"]
         for k in ("val_quarters", "test_quarters"):
@@ -187,6 +203,31 @@ def check_studies(studies):
             raise ConfigError(f"study P windows must start after its start date and run forward: {p!r}")
         if not (windows[0][1] < windows[1][0] and windows[1][1] < windows[2][0]):
             raise ConfigError(f"study P train, val and test windows must not overlap: {p!r}")
+
+
+def check_features(features, smart_ids):
+    missing = [k for k in FEATURE_KEYS if k not in features]
+    if missing:
+        raise ConfigError(f"features is missing keys: {missing}")
+    needed = set(features["s_smart_ids"]) | set(FEATURE_SMART)
+    if not needed <= set(smart_ids):
+        raise ConfigError(f"features need SMART {sorted(needed - set(smart_ids))}, which are not in smart_ids")
+    if not set(features["error_counters"]) <= set(features["s_smart_ids"]):
+        raise ConfigError("features.error_counters must be a subset of features.s_smart_ids")
+    windows = features["windows"]
+    if not windows or not all(isinstance(k, int) and k > 0 for k in windows):
+        raise ConfigError(f"features.windows must be positive integers, got {windows!r}")
+    for k in ("pod_window_days", "lba_bytes"):
+        if not isinstance(features[k], int) or features[k] < 1:
+            raise ConfigError(f"features.{k} must be a positive integer")
+    for k in ("min_coverage", "fill_phase_max_fills", "n_floor_tb_per_day", "excess_smoothing"):
+        if not isinstance(features[k], (int, float)) or features[k] <= 0:
+            raise ConfigError(f"features.{k} must be a positive number")
+    sample = features["train_sample"]
+    if set(sample) != {"max_rows", "near_failure_days"} or not all(
+            isinstance(v, int) and v > 0 for v in sample.values()):
+        raise ConfigError(f"features.train_sample needs positive integers max_rows and near_failure_days, "
+                          f"got {sample!r}")
 
 
 def parse_date(value):

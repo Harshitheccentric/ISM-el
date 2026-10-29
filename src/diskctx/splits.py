@@ -242,26 +242,43 @@ def weighted_precision(flagged, failed, weight):
 # --- rows ---------------------------------------------------------------------------------
 
 
-def split_rows(labelled, assignment, windows, split, horizon, feature_set, groups):
+def split_rows(labelled, assignment, windows, split, horizon, feature_set, groups, last_seen=None):
     """The drive-days of one split for one horizon (see the module docstring).
 
     labelled: drive-day rows from labels.label_rows (model, serial_number, date,
     fail_date, y_N, ...). feature_set is only checked against the study's groups: the
-    rows are the same for every feature set."""
+    rows are the same for every feature set.
+    last_seen: optional (model, serial_number, last_seen) = each drive's last record up to
+    the split's window end (see last_records). Pass it when `labelled` holds only part of
+    the history (one quarter); otherwise it is computed from `labelled`."""
     check_feature_set(feature_set, groups)
     y, n = y_col(horizon), timedelta(days=horizon)
     drives = assignment.lazy().filter((pl.col("split") == split) & pl.col("keep")).select(KEY)
     win = used(windows).lazy().filter(pl.col("split") == split).select("model", "start", "end")
     lf = (labelled.lazy().join(drives, on=KEY).join(win, on="model")
-          .filter(pl.col("date") <= pl.col("end"))
-          .with_columns(pl.col("date").max().over(KEY).alias("last_seen"))     # last record <= end
-          .filter((pl.col("date") >= pl.col("start")) & pl.col(y).is_not_null()))
+          .filter(pl.col("date") <= pl.col("end")))
+    if last_seen is None:
+        lf = lf.with_columns(pl.col("date").max().over(KEY).alias("last_seen"))  # last record <= end
+    else:
+        lf = lf.join(last_seen.lazy().select(*KEY, "last_seen"), on=KEY, how="left")
+    lf = lf.filter((pl.col("date") >= pl.col("start")) & pl.col(y).is_not_null())
     fails_inside = pl.col("fail_date").is_not_null() & (pl.col("fail_date") <= pl.col("end"))
     survived = (pl.col(y) == 0) & (pl.col("date") + n <= pl.col("last_seen"))
     lf = lf.filter(fails_inside | survived)
     if split != "test":
         lf = lf.filter(pl.col("date") + n <= pl.col("end"))                     # embargo
     return lf.drop("start", "end", "last_seen").collect().sort(*KEY, "date")
+
+
+def last_records(rows, windows, split):
+    """(model, serial_number, last_seen): each drive's last record on or before the end of
+    its model's `split` window, from drive-day rows (model, serial_number, date; may be
+    a LazyFrame over many files). For split_rows(..., last_seen=)."""
+    win = used(windows).lazy().filter(pl.col("split") == split).select("model", "end")
+    return (rows.lazy().select(*KEY, "date").join(win, on="model")
+            .filter(pl.col("date") <= pl.col("end"))
+            .group_by(KEY).agg(pl.col("date").max().alias("last_seen"))
+            .collect(engine="streaming"))
 
 
 def read_study(storage, study):

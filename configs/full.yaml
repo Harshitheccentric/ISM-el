@@ -82,6 +82,7 @@ budget:
   default_zip_bytes: 2000000000
   default_day_bytes: 210000000
   default_parquet_bytes: 750000000
+  default_feature_bytes_per_row: 60   # feature files; replaced by 1.5 x the measured value
 
 # M3 splits. Drives that fail inside a study's split window go to that split; all other
 # drives go by a seeded hash with these shares. Train healthy drives are downsampled by
@@ -120,3 +121,25 @@ studies:
     train: [2023-08-01, 2025-03-31]
     val: [2025-04-01, 2025-09-30]
     test: [2025-10-01, 2026-06-30]
+
+# M4 features (see src/diskctx/features.py). Every feature at day t uses only rows <= t-1,
+# computed as of the drive's last reading of each column and carried forward.
+features:
+  s_smart_ids: [5, 9, 187, 188, 194, 197, 198]   # S raw values, if the model reports them
+  error_counters: [5, 187, 188, 197, 198]        # S deltas and N use these
+  min_coverage: 0.95          # a SMART ID enters a model's S set at this non-null share (train + val)
+  windows: [7, 30]            # days, for deltas, means, maxima and N
+  lba_bytes: 512              # SMART 241/242 count 512-byte LBAs
+  fill_phase_max_fills: 1.0   # fill phase while lifetime writes < this x capacity
+  n_floor_tb_per_day: 0.01    # floor for every workload denominator (N, recent / lifetime)
+  pod_window_days: 30         # P failure counts over the days [t-30, t-1]
+  excess_smoothing: 1         # P excess = (observed + 1) / (expected + 1)
+  # Train split only (storage, not evaluation; Harsh, 2026-10-28): keep every row within
+  # near_failure_days of a failure, hash-sample the rest so a study stores <= max_rows.
+  train_sample: {max_rows: 15000000, near_failure_days: 60}
+
+# How much memory DuckDB may use. Not hashed: it never changes a result. 3 GB fits this
+# 7 GB laptop and free Colab (12 GB).
+resources:
+  duckdb_memory_limit: 3GB
+  duckdb_threads: 4

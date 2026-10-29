@@ -421,10 +421,112 @@
   - Of the 72,420 non-boot drives present on 01-27, 0 are missing on 02-01 without a
     failure event: nobody disappears across the gap.
 
+- **M4 (2026-10-28/29)** — `features` (groups S, W, N, P), stages `features_sampling`,
+  `features_rates` and one `features_<model>` per model (`python -m diskctx run --config
+  ... --stages features`), `tools/diagnostics/feature_missingness.py`.
+  - Timing rule, every feature: a feature at t uses only rows dated <= t-1. A reading of
+    a column = a row where it is not null. Each feature is computed as of the drive's
+    last reading a <= t-1 of its column and carried forward (a silent drive keeps its
+    values). k-day per-day delta = (x_a - x_b) / (a - b) calendar days, b = the last
+    reading <= a-k, else the earliest reading; null only without an earlier reading.
+    A fall in 241/242 is a reset: null, counted per model and quarter (marker info).
+    Error counters keep their sign (197 can fall). No "is null" / "days since" columns.
+  - Registry `GROUPS` (each maps the drive's as-of table, plus pod tables for P, to
+    {name: SQL}):
+    - S: raw SMART the model reports (coverage >= 0.95 over the study's train + val
+      windows, from days.csv; Harsh D2), plus 7/30-day deltas of 5/187/188/197/198.
+      Seagates: all 7 IDs; Toshiba: 5, 9, 194, 198.
+    - W: TB/day written/read over the last interval; the same / capacity; 7/30-day mean
+      and max; mean7 / max(lifetime average, 0.01 TB/day), with age floored at 1 day;
+      age = SMART 9 / 24; lifetime fills = 241 x 512 B / capacity; fill phase (< 1 fill).
+    - N: Δerr / max(TB written/day, 0.01) and Δerr / max(TB written+read/day, 0.01)
+      (Harsh D3), 7/30 days.
+    - P (Study P only; `study_columns` and the config check refuse P in W): pod key =
+      the last pod_key <= t-1. Pod mean TB written/read and temperature come from the
+      pod's last pod-day <= t-1 (the means include the drive); also drive minus pod
+      temperature and slot. Failures in pod / vault / cluster over [t-30, t-1] minus
+      the drive's own events. Expected = Σ drive-days x model base rate, minus the
+      drive's own days (`p_expected_*`). Excess = (observed + 1) / (expected + 1)
+      (`excess_smoothing`). Base rates = failures / drive-days per model over Study P's
+      train window only (`features/P/base_rates.csv`; the pooled rate for a model
+      without train drive-days).
+    - Columns: Seagate W 54, P 68; Toshiba W 33, P 47.
+  - Pass 1 also writes `pod_models.parquet` (pod x model x day: drives, failures;
+    non-boot, the pod_days boot rule). It is written only for quarters from Study P's
+    start (stage param `pod_models`), so only audit 2023Q3–2026Q2 reran (Harsh D1).
+  - Processing: per model, quarter by quarter, in one DuckDB connection (memory limit
+    from `resources`). Input = the quarter's rows + the last 30 days of the previous
+    quarter + two carried rows per drive and column (the reading before the warm-up;
+    the as-of row of the last reading before the quarter). Tested equal to one pass
+    over the whole history. `splits.split_rows(..., last_seen=)` (from
+    `splits.last_records`) gives the same rows quarter by quarter.
+  - Files: `features/<study>/<model>/{train,val,test}.parquet` (durable; CLAUDE.md tier
+    line changed by Harsh's request) + `columns.json` (S set, coverage, columns per
+    group). Rows = split_rows for every horizon (`in_7/14/30`), with fail_date, y_N and
+    sample_weight; features are Float32. Train sampling: see the addendum under "Frozen".
+  - Config: `features:` (every knob), `resources:` (DuckDB memory limit 3GB, 4 threads;
+    not hashed), `budget.default_feature_bytes_per_row`; a budget guard per model.
+  - Tests: test_features 18, test_audit +1. Covered:
+    - past-only over the whole registry: every value on day t and later replaced
+      (values, nulls, resets, pods, events);
+    - a gap gives a per-day rate, and there is no NaN when an earlier reading exists;
+    - a reset is null and counted; a 197 fall is kept;
+    - pod counts exclude the drive, and a moved drive uses its old pod through t;
+    - expected counts and the smoothed excess match a hand calculation; base rates
+      ignore val/test failures;
+    - SMART sets follow coverage (0.95 in, 0.949 out, window only);
+    - age comes from SMART 9 and the fill phase from 241; a new drive gives a finite
+      recent ratio; the floors apply;
+    - Study W refuses P;
+    - quarter by quarter equals one pass (including a 40-day silence across the
+      boundary), and split_rows by quarter equals the whole history;
+    - train sampling: seeded, val/test complete, near-failure rows kept, weights 1/r,
+      the Python hash equals the DuckDB hash; r caps the rows;
+    - end to end on the synthetic pipeline: one file per study/model/split, in_N rows =
+      split_rows, columns = registry, coverage window = train start .. val end;
+    - a features setting reruns features_* and downstream only; `resources` reruns
+      nothing;
+    - the budget guard stops with a clear message; pod tables load after a quarter
+      without pod fields; the diagnostic refuses test.
+  - Done-check: `pytest -q tests/test_features.py` 18 passed; full `pytest -q` 170 passed.
+  - **Real run (local, DISKCTX_LOCAL_ROOT=~/diskctx_data):**
+    - Audit 2023Q3–2026Q2 + labels + splits: 1 h 02 min, 1.7 GB peak RSS (11 downloads;
+      the kept 2026Q1 zip was hard-linked). Every output is unchanged except: the new
+      pod_models; quality.csv, which gained the date-check rows (these quarters were
+      audited before that check); and pod_days floats, which differ by <= 7e-16
+      relative (parallel sum order). labels/ and splits/ are identical. pod_models: 12
+      quarters, 11.9 MB, sums equal pod_days on every pod-day checked (2023Q3, 2024Q4,
+      2026Q2).
+    - Sampling: W train 105,786,314 rows (653,553 within 60 days of a failure), r =
+      0.1365; P train 17,328,409 (123,061), r = 0.8647. Base rates: 60 models, pooled
+      7,159 failures in 164,872,626 drive-days.
+    - The first features run stopped at ST12000NM0008 2023Q3: 2023Q2's empty pod_days
+      has an int32 pod_key. The loader now casts each file (tested). Sampling + rates
+      took about 5.5 min; the six model stages 1 h 07 min; peak RSS 4.6 GB.
+    - Stored: 41,778,470 rows, 3,221,461,794 bytes (3.22 GB, 77 B/row). W train
+      14,998,530 / val 2,396,928 / test 2,954,278; P train 14,999,677 / val 2,002,283 /
+      test 4,426,774. By model: ST12000NM0008 11.6 M (0.87 GB, 14 min), ST8000NM0055
+      9.3 M (0.71 GB, 12 min), ST8000DM002 6.2 M (0.49 GB, 9 min), ST14000NM001G 6.2 M
+      (0.47 GB, 6 min), ST4000DM000 5.7 M (0.46 GB, 24 min), MG08ACA16TEY 2.8 M
+      (0.22 GB, 2 min). Durable `root/full` is now 8.2 GB.
+    - 241/242 resets: ST4000DM000 13,986, ST8000NM0055 10,323, ST8000DM002 7,081 (all
+      but 23 / 51 / 5 of them in 2019Q2, see Open questions), ST12000NM0008 23,
+      ST14000NM001G 0, MG08ACA16TEY 0.
+    - Missingness (train and val only; `results/diagnostics/feature_missingness.csv`,
+      1,244 study x model x split x feature rows): 576 are flagged by the 2x rule, but
+      every one has both rates < 1% (456 < 0.1%). The highest pre-failure null rate
+      anywhere is 0.44% (P ST12000NM0008 val p_pod_tb*_mean, 7 of 1,593 rows). Flags
+      resting on >= 10 null pre-failure rows are only in W train: ST4000DM000 (<= 36 of
+      32,232 rows, 0.11% vs 0.054% healthy) and ST8000NM0055 (<= 39 of 14,984, 0.26% vs
+      0.105%). Before carry-forward the raw columns were at 12.4% (slot) and 2.1% (SMART
+      5) vs ~0, so the rule removed the "silent before failure" signal.
+
 ## Next
 - Harsh: decide the study settings from the labels/splits table (Done: kept as they
   are, frozen below, tag `studies-frozen`).
-- **M4** — features S/W/N/P (requirements below).
+- M4 done. Harsh: decide the 2019-06-17 question (Open questions) before M5 trains on
+  Study W.
+- **M5** — models, evaluation, Experiments A/B (requirements below).
 
 ## Frozen before modelling (2026-10-28)
 Fixed before any model is trained (git tag `studies-frozen`); not to be changed after
@@ -478,6 +580,18 @@ looking at results. Every test cell has at least 60 failed drives (900 pooled in
     resamples for both feature sets, percentile 95% CI, fixed seed.
   - The Study W secondary test (S vs S+W+N) uses the same rules as B.
   - Bootstrap seed: 42 (the config seed).
+- **Addendum (2026-10-28, Harsh, M4): train-set sampling.** This changes the training
+  data only, not evaluation; nothing had been trained yet. W train had 107 M rows,
+  which won't fit XGBoost in 7 GB (laptop) or 12 GB (free Colab).
+  - Train split only. Every drive-day of a failed drive within 60 days before its
+    failure is kept (all positives plus the negatives near them), sample_weight 1.
+  - Every other train drive-day is kept if hash_unit(seed, "rows", serial, date) < r,
+    sample_weight 1/r. r per study is set so the stored train set has at most 15 M
+    rows (`features.train_sample`).
+  - Features are still computed over full histories. Val and test are complete
+    (weight 1).
+  - Result: r = 0.1365 (W) and 0.8647 (P); stored train rows 14,998,530 (W) and
+    14,999,677 (P).
 
 ## M2 requirements (decided 2026-10-27)
 - Full 2016–2026 range must run on free Colab; never shrink the range to fit Drive.
@@ -563,6 +677,9 @@ looking at results. Every test cell has at least 60 failed drives (900 pooled in
   F1 and MCC must weight healthy drives by 1/share of their split (the `weight` column
   in `splits/<study>/drives.parquet`) so they reflect the real fleet ratio. Tested:
   weighted precision on a synthetic test split matches precision on the whole population.
+- Feature files (M4): train rows are sampled (see the addendum under "Frozen"), and
+  `sample_weight` is 1/r for sampled rows and 1 otherwise; val and test have weight 1.
+  A model's features are the columns listed in `columns.json` for its study and groups.
 
 ## Open questions
 - The carried end state is read when a quarter runs; it is not in the stage hash. If an
@@ -574,11 +691,30 @@ looking at results. Every test cell has at least 60 failed drives (900 pooled in
 - Several high-failure models lack 241/242 (MG08ACA16TA, HUH721212ALN604,
   MG07ACA14TA). They can't be used for W/N under the current rule; HANDOFF's fallback is
   to pool related models or demote a feature group.
-- M4 pod_key "from before any move": the drive's first pod_key (seen from 2023-07-01),
-  or the pod_key before its latest move, as of t-1? Check (a) found 26 moves in 29.9 M
-  drive-days in 2026Q1 and none for failing drives, so the choice changes few rows.
+- ~~M4 pod_key "from before any move"~~ **Closed (Harsh, M4):** P features are keyed by
+  the drive's pod_key on its last record on or before t-1 (its location as of
+  yesterday). A drive that moves on day m uses its old pod through t = m (tested).
 - The labels' "last record" is the last pass-2 row; days dropped by the no-SMART row
   rule do not count as records, so censoring is slightly conservative.
+- **TODO (Harsh): `2019-06-17.csv` has scrambled SMART values** (found in M4 from the
+  241/242 reset counts; read-only checks on the pass-2 Parquet, 6 models).
+  - Evidence: 92% of drives seen on 06-16 and 06-17 (40,316 of 43,687) have an
+    impossible SMART 9 step (< 0 h or > 48 h), and the same share steps back on 06-18.
+    Scanning all 3,818 days, no other day is above 1.8%. On 06-17, the three models in
+    the data (ST4000DM000, ST8000NM0055, ST8000DM002) have almost the same SMART 9
+    distribution (p10 3,671–4,286 h, p90 31,367–33,439 h), unlike 06-16 and 06-18. So
+    the values seem mixed across the fleet, not bound to the row's serial. Example:
+    Z305FZXR has 29,161 h on 06-16, 9,688 h on 06-17 and 29,209 h on 06-18.
+  - The failure flags look right: 8 events that day, and the 3 in pass-2 models have
+    their last record on 06-17. It is also the M/D/YY file from the date fix.
+  - Effect now: Study W train only (2019Q2 is train for those 3 models). That day's
+    values are wrong, 241/242 show ~31,000 false resets (null deltas), and the 06-17
+    spike enters w_tb*_max7/30 for up to 30 days. Not in Study P, val or test.
+  - Options: (a) recommended: treat the day's SMART values as missing (a new config key,
+    e.g. `bad_smart_days: {2019-06-17: evidence}`, applied when reading rows for
+    features, so the events, labels and splits are unchanged; reruns only those 3
+    models' features, about 45 min); (b) drop the whole file via `dropped_days` (loses
+    its 8 failure events, against the copied-days rule); (c) keep it and report it.
 
 ## Threats to validity
 - **Failure labels.** 236 serials keep reporting after their failure flag (104,855 rows

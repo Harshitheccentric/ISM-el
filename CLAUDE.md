@@ -93,8 +93,9 @@ Read `docs/HANDOFF.md` for project context and `PROGRESS.md` for where we are.
 - Stage pattern: work on local disk → copy to ROOT → verify → write done-marker LAST
   (config hash + timestamp). Skip only if marker exists and hash matches.
 - Two artifact tiers: durable (copied to ROOT: audit tables, filtered Parquet, splits,
-  models, results) and cache (local only: feature tables). Marker present but cache
-  output missing → rebuild from durable inputs, never fail.
+  feature tables, models, results) and cache (local only, rebuildable scratch; no stage
+  uses it since M4). Marker present but cache output missing → rebuild from durable
+  inputs, never fail.
 - Budget guard: status table shows free ROOT and /content space plus measured bytes per
   quarter (zip, largest day, Parquet), logged in the download log. Stop with a clear
   message if the next unit would not fit.

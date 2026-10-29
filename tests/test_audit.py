@@ -11,7 +11,14 @@ import pytest
 from conftest import csv_text, write_zip
 
 import diskctx.audit as audit
-from diskctx.audit import read_csv_rows, read_selection, select_models, selection_warning, swn_window
+from diskctx.audit import (
+    pod_models_param,
+    read_csv_rows,
+    read_selection,
+    select_models,
+    selection_warning,
+    swn_window,
+)
 from diskctx.ingest import ingest_quarter, ingest_stages, read_day
 from diskctx.pipeline import run_data
 from diskctx.storage import stage_hashes
@@ -309,6 +316,23 @@ def test_pod_days_cover_all_non_boot_models(cfg, zip_fetch):
     assert p["failures"] == 3                                 # S1, O1 and O2 (no SMART)
     assert p["tb_written_mean"] is None                       # no yesterday to compare with
     assert pods["sac0|000|2017|02"]["drives"] == 1
+
+    # pod_models: the same drives and failures, split by model; boot models left out
+    mix = {(m["pod_key"], m["model"]): (m["drives"], m["failures"])
+           for m in parquet_rows(storage, "audit/quarters/2026Q1/pod_models.parquet")}
+    assert mix == {("sac0|000|1154|02", "SYNTH SEL"): (2, 1), ("sac0|000|1154|02", "SYNTH OTHER"): (2, 2),
+                   ("sac0|000|2017|02", "SYNTH SEL"): (1, 0)}
+    for key, pod in pods.items():
+        assert sum(d for (k, _), (d, _) in mix.items() if k == key) == pod["drives"]
+        assert sum(f for (k, _), (_, f) in mix.items() if k == key) == pod["failures"]
+
+
+def test_pod_models_only_from_study_p_start(cfg):
+    assert pod_models_param(cfg, "2026Q1") == {"pod_models": True}     # fixture: P starts 2026-01-01
+    assert pod_models_param(cfg, "2025Q4") == {}
+    late = dict(cfg, studies=dict(cfg["studies"], P=dict(cfg["studies"]["P"], start="2026-02-15")))
+    assert pod_models_param(late, "2026Q1") == {"pod_models": True}
+    assert pod_models_param(dict(cfg, studies={"W": cfg["studies"]["W"]}), "2026Q1") == {}
 
 
 def crafted_zip(quarter, days_rows):
