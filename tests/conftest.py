@@ -33,6 +33,7 @@ def cfg(tmp_path):
             "default_feature_bytes_per_row": 1,
         },
         "dropped_days": {},
+        "smart_missing_days": {},
         "splits": {"shares": {"train": 0.5, "val": 0.2, "test": 0.3}, "healthy_per_failed": 20,
                    "min_failed_drives": {"train": 1, "val": 1, "test": 1}, "min_test_failures": 50},
         "studies": {

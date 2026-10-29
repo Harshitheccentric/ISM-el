@@ -73,6 +73,21 @@ dropped_days:
     after 2022-12-09.csv, i.e. two days on; rows identical to 2022-12-11.csv except 8
     failure flags (0 here, 1 there)
 
+# Days whose SMART values are not readings (features only, Harsh 2026-10-29): the rows stay
+# (as samples and in the Parquet), and so do their failure events, but no later feature
+# uses their SMART values. Use this when a day's SMART columns are wrong, not just old.
+smart_missing_days:
+  2019-06-17: >-
+    scrambled SMART values (checked 2026-10-29 on the pass-2 Parquet,
+    tools/diagnostics/day_anomalies.py): 40,356 of 43,732 SMART 9 steps into the day are
+    impossible (92%) and 99.99% of them revert on the next reading; 2019-06-18 shows the
+    step back. Other days <= 1.8%, except 2017-02-01 (steps from the kept stale 2017-01-27
+    over the 01-28..31 gap, not scrambled). The three models in the data (ST4000DM000, ST8000NM0055,
+    ST8000DM002) have nearly the same SMART 9 distribution that day, e.g. Z305FZXR
+    29,161 h -> 9,688 h -> 29,209 h; capacity is right. Its 8 failure flags are kept: each
+    drive reported every day from 06-01, has its last row on 06-17 and no row after it
+    through 2019-09-30, nor at any later quarter end through 2026Q2. Also the M/D/YY file.
+
 budget:
   margin_bytes: 1000000000    # keep this much free on each disk
   # Estimate per size = max(default, 1.5 x largest measured quarter). Errs high.

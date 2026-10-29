@@ -510,8 +510,8 @@
       (0.47 GB, 6 min), ST4000DM000 5.7 M (0.46 GB, 24 min), MG08ACA16TEY 2.8 M
       (0.22 GB, 2 min). Durable `root/full` is now 8.2 GB.
     - 241/242 resets: ST4000DM000 13,986, ST8000NM0055 10,323, ST8000DM002 7,081 (all
-      but 23 / 51 / 5 of them in 2019Q2, see Open questions), ST12000NM0008 23,
-      ST14000NM001G 0, MG08ACA16TEY 0.
+      but 23 / 51 / 5 of them in 2019Q2: the scrambled 2019-06-17, fixed in the next
+      entry), ST12000NM0008 23, ST14000NM001G 0, MG08ACA16TEY 0.
     - Missingness (train and val only; `results/diagnostics/feature_missingness.csv`,
       1,244 study x model x split x feature rows): 576 are flagged by the 2x rule, but
       every one has both rates < 1% (456 < 0.1%). The highest pre-failure null rate
@@ -520,12 +520,50 @@
       32,232 rows, 0.11% vs 0.054% healthy) and ST8000NM0055 (<= 39 of 14,984, 0.26% vs
       0.105%). Before carry-forward the raw columns were at 12.4% (slot) and 2.1% (SMART
       5) vs ~0, so the rule removed the "silent before failure" signal.
+  - Committed as `df81fa6`.
+
+- **2019-06-17: scrambled SMART day (2026-10-29, Harsh: option a).**
+  - The 8 failure events of that day look genuine. Each drive reported every day from
+    06-01 to 06-16, has failure = 1 on 06-17, and has no row after it through
+    2019-09-30 (raw 2019Q2/Q3 zips, read-only). None is on any later quarter's last day
+    through 2026Q2 (end_state), and none has a second event.
+  - New config key `smart_missing_days: {day: evidence}` (full.yaml: 2019-06-17; smoke:
+    `{}`). On those days the rows stay (as samples, in the Parquet, in labels), and so
+    do their failure events. Their SMART columns are never readings for later days;
+    capacity, slot and pod_key still are (capacity is right that day). It is applied in
+    `features.run_period`. A model's stage params hold the days in quarters where it
+    has rows, so only those models rerun.
+  - Rerun: only features_ST4000DM000, features_ST8000NM0055 and features_ST8000DM002
+    (48 min, 4.7 GB peak RSS); the other 92 stages were skipped. All 49 event, label and
+    split files (labels/*, splits/*.csv incl. summary.csv, splits/*/drives.parquet, every
+    events.parquet) have the same sha256 as before. Every feature file has the same row
+    count. Features now total 3,221,243,317 bytes.
+  - 241/242 resets: ST4000DM000 13,986 / 13,958 -> 24 / 24; ST8000NM0055 10,323 / 10,366
+    -> 52 / 52; ST8000DM002 7,081 / 7,075 -> 5 / 6. In 2019Q2 alone: 13,963 -> 1,
+    10,272 -> 1, 7,076 -> 0 (241).
+  - `tools/diagnostics/day_anomalies.py` (pass-2 Parquet, read-only) ->
+    `results/diagnostics/day_anomalies.csv`, one row per day (3,824). A step between two
+    readings g calendar days apart is impossible if SMART 9 falls or grows by more than
+    24 h x g + 24 h (`--margin`). "Reverts" = the next reading fits the one before the
+    day. Flagged (>= 5%):
+    - 2019-06-17: 92.3% impossible, 99.99% revert (the scrambled day);
+    - 2019-06-18: 92.3%, 0.3% revert (the step back);
+    - 2017-02-01: 99.99%, 0% revert. This is the known late-January 2017 gap: the last
+      reading before it is the kept stale 2017-01-27 (01-26's early snapshot), so
+      01-27 -> 02-01 is about +150 h over 5 calendar days vs 144 h allowed. Not
+      scrambled.
+    - Every other day <= 1.8%.
+  - Tests: a missing day gives no SMART readings (features equal those with the day's
+    SMART set to null, the false reset gone, the row and its slot kept, nothing <= the
+    day changed); a smart_missing_day reruns only the model feature stages (+
+    downstream), not labels or splits, and a day without rows reruns nothing; the config
+    check; the anomaly tool flags a reverting scrambled day, not the step back, not a
+    real drop, not a 3-day gap. test_features 20, full `pytest -q` 172 passed.
 
 ## Next
 - Harsh: decide the study settings from the labels/splits table (Done: kept as they
   are, frozen below, tag `studies-frozen`).
-- M4 done. Harsh: decide the 2019-06-17 question (Open questions) before M5 trains on
-  Study W.
+- M4 done (2019-06-17 handled, see Done).
 - **M5** — models, evaluation, Experiments A/B (requirements below).
 
 ## Frozen before modelling (2026-10-28)
@@ -696,31 +734,20 @@ looking at results. Every test cell has at least 60 failed drives (900 pooled in
   yesterday). A drive that moves on day m uses its old pod through t = m (tested).
 - The labels' "last record" is the last pass-2 row; days dropped by the no-SMART row
   rule do not count as records, so censoring is slightly conservative.
-- **TODO (Harsh): `2019-06-17.csv` has scrambled SMART values** (found in M4 from the
-  241/242 reset counts; read-only checks on the pass-2 Parquet, 6 models).
-  - Evidence: 92% of drives seen on 06-16 and 06-17 (40,316 of 43,687) have an
-    impossible SMART 9 step (< 0 h or > 48 h), and the same share steps back on 06-18.
-    Scanning all 3,818 days, no other day is above 1.8%. On 06-17, the three models in
-    the data (ST4000DM000, ST8000NM0055, ST8000DM002) have almost the same SMART 9
-    distribution (p10 3,671–4,286 h, p90 31,367–33,439 h), unlike 06-16 and 06-18. So
-    the values seem mixed across the fleet, not bound to the row's serial. Example:
-    Z305FZXR has 29,161 h on 06-16, 9,688 h on 06-17 and 29,209 h on 06-18.
-  - The failure flags look right: 8 events that day, and the 3 in pass-2 models have
-    their last record on 06-17. It is also the M/D/YY file from the date fix.
-  - Effect now: Study W train only (2019Q2 is train for those 3 models). That day's
-    values are wrong, 241/242 show ~31,000 false resets (null deltas), and the 06-17
-    spike enters w_tb*_max7/30 for up to 30 days. Not in Study P, val or test.
-  - Options: (a) recommended: treat the day's SMART values as missing (a new config key,
-    e.g. `bad_smart_days: {2019-06-17: evidence}`, applied when reading rows for
-    features, so the events, labels and splits are unchanged; reruns only those 3
-    models' features, about 45 min); (b) drop the whole file via `dropped_days` (loses
-    its 8 failure events, against the copied-days rule); (c) keep it and report it.
+- ~~2019-06-17.csv has scrambled SMART values~~ **Closed (Harsh, option a, 2026-10-29):**
+  its SMART values are treated as missing (`smart_missing_days`), its failure events are
+  kept. See Done and Threats to validity.
 
 ## Threats to validity
 - **Failure labels.** 236 serials keep reporting after their failure flag (104,855 rows
   after a failure dropped, after the copied days were removed; 104,944 before). So some
   Backblaze "failures" may be removals or redeployments, not hardware deaths; the
   label is "Backblaze flagged the drive as failed", and the paper should say so.
+- **Data quality: a scrambled SMART day (rule for the paper).** One day, 2019-06-17,
+  has scrambled SMART values: 92% of drives take an impossible SMART 9 step into it and
+  step back the next day (`results/diagnostics/day_anomalies.csv`). Its readings are
+  treated as missing (`smart_missing_days`) and its failure events are kept: the 8
+  failed drives each stop reporting after 06-17.
 - **Copied day files (rule for the paper).** A day file that is an exact copy of
   another day is dropped and the day counts as missing: 6 files (2017-01-29,
   2017-12-31, 2019-08-26, 2019-10-15, 2021-07-01, 2022-12-10; `dropped_days` in

@@ -124,6 +124,11 @@ def test_dropped_days_need_a_date_and_evidence(cfg):
         check_config(dict(cfg, dropped_days={"12/10/22": "copy"}))
     assert dropped_days(dict(cfg, dropped_days={"2022-12-10": "copy"}), "2022Q4") == ["2022-12-10"]
     assert dropped_days(dict(cfg, dropped_days={"2022-12-10": "copy"}), "2023Q1") == []
+    with pytest.raises(ConfigError, match="smart_missing_days"):
+        check_config(dict(cfg, smart_missing_days={"2019-06-17": " "}))
+    with pytest.raises(ConfigError, match="smart_missing_days"):
+        check_config(dict(cfg, smart_missing_days=["2019-06-17"]))
+    check_config(dict(cfg, smart_missing_days={"2019-06-17": "scrambled SMART values"}))
 
 
 def test_min_failed_drives_needs_every_split(cfg):

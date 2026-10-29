@@ -189,6 +189,37 @@ def test_delta_across_a_gap_is_a_per_day_rate(cfg):
         assert later[col].null_count() == 0, col                           # an earlier reading exists
 
 
+def test_smart_missing_day_gives_no_readings_but_keeps_its_row(cfg):
+    """2019-06-17 on the real data: one day's SMART values are scrambled. With the day in
+    smart_missing_days, later days see no SMART reading from it (as if it were null), the
+    false reset is gone, and the day's row is still a sample with its non-SMART fields."""
+    rows = [reading("S", n, slot="0009" if n == 10 else "0003") if n != 10 else
+            reading("S", n, slot="0009", smart_5=99, smart_9=500, smart_241=10**13, smart_242=10**13)
+            for n in range(20)]
+    rows += [reading("N", n, smart_5=n) for n in range(20)]
+    scrambled = frame(rows)
+    pods = pod_tables(scrambled, [], [])
+    columns = all_columns(cfg["features"])
+    want = scrambled.select("serial_number", "date")
+    raw, raw_resets = compute_features(scrambled, want, cfg["features"], columns, cfg["resources"], pods=pods,
+                                       model="M")
+    out, resets = compute_features(scrambled, want, cfg["features"], columns, cfg["resources"], pods=pods,
+                                   model="M", smart_missing=[day(10)])
+    assert raw_resets["smart_241_raw"] == 1 and at(raw, "S", 11)["s_smart_5"] == 99     # the problem
+    assert resets == {"smart_241_raw": 0, "smart_242_raw": 0}
+    nulled = scrambled.with_columns([pl.when(pl.col("date") == day(10)).then(None).otherwise(pl.col(f"smart_{i}_raw"))
+                                     .alias(f"smart_{i}_raw") for i in SMART])
+    as_null, _ = compute_features(nulled, want, cfg["features"], columns, cfg["resources"], pods=pods, model="M")
+    smart_cols = [c for c in columns if not c.startswith("p_slot")]
+    assert out.select("serial_number", "date", *smart_cols).equals(as_null.select("serial_number", "date", *smart_cols))
+    s11 = at(out, "S", 11)
+    assert s11["s_smart_5"] == 0 and s11["w_age_days"] == pytest.approx((24000 + 24 * 9) / 24)    # from day 9
+    assert at(out, "S", 12)["w_tbw_1d"] == pytest.approx(TB_PER_DAY)       # day 11 vs day 9, per day
+    assert s11["p_slot"] == 9                                              # the row's slot still counts
+    upto = pl.col("date") <= day(10)                                       # day 10 itself: from <= day 9
+    assert out.filter(upto).equals(raw.filter(upto)) and out.height == raw.height     # every row stays
+
+
 def test_reset_gives_a_null_delta_and_is_counted(cfg):
     rows = [reading("R", n, smart_241=(10**10 + n * 2 * 10**9) if n < 20 else (n - 20) * 2 * 10**9,
                     smart_197=5 if n < 10 else 3) for n in range(40)]
@@ -507,6 +538,17 @@ def test_feature_stages_on_synthetic_pipeline(cfg, fleet_fetch):
     moved = dict(changed, resources={"duckdb_memory_limit": "2GB", "duckdb_threads": 1})
     assert set(storage.run_stages(stages(moved), moved).values()) == {"skipped"}   # resources are not hashed
 
+    # A smart_missing_day reruns only the features of models with rows in its quarter.
+    sampled = {k: read_features(storage, *k) for k in full}
+    inside = dict(changed, smart_missing_days={"2025-11-15": "scrambled (test)"})
+    third = storage.run_stages(stages(inside), inside)
+    assert {n for n, r in third.items() if r != "skipped"} == {*model_stages, "models"}   # not labels, splits
+    for key, before in sampled.items():
+        after = read_features(storage, *key)
+        assert after.select("serial_number", "date", "y_7").equals(before.select("serial_number", "date", "y_7"))
+    outside = dict(inside, smart_missing_days={"2025-11-15": "scrambled (test)", "2015-01-01": "no rows then"})
+    assert set(storage.run_stages(stages(outside), outside).values()) == {"skipped"}
+
 
 def test_pod_tables_load_after_a_quarter_without_pod_fields(cfg):
     """Before the pod fields (2023Q2 on the real data), pod_days is empty and its pod_key
@@ -551,9 +593,9 @@ def test_feature_budget_stops_with_a_clear_message(cfg, tmp_path):
 # --- 13. the missingness diagnostic -----------------------------------------------------------
 
 
-def load_tool():
-    path = Path(__file__).resolve().parents[1] / "tools" / "diagnostics" / "feature_missingness.py"
-    spec = importlib.util.spec_from_file_location("feature_missingness", path)
+def load_tool(name="feature_missingness"):
+    path = Path(__file__).resolve().parents[1] / "tools" / "diagnostics" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -578,3 +620,21 @@ def test_missingness_diagnostic_refuses_test_and_counts_nulls():
 SETTINGS = {"s_smart_ids": S_IDS, "error_counters": [5, 187, 188, 197, 198], "min_coverage": 0.95,
             "windows": [7, 30], "lba_bytes": 512, "fill_phase_max_fills": 1.0, "n_floor_tb_per_day": 0.01,
             "pod_window_days": 30, "excess_smoothing": 1, "train_sample": {"max_rows": 100, "near_failure_days": 60}}
+
+
+def test_day_anomalies_flags_a_scrambled_day_that_reverts():
+    tool = load_tool("day_anomalies")
+    rows = []
+    for n in range(10):
+        rows.append(("A", n, 1000 + 24 * n))                          # normal
+        rows.append(("B", n, 50 if n == 5 else 1000 + 24 * n))        # scrambled on day 5, back on day 6
+        rows.append(("D", n, 1000 + 24 * n if n < 5 else 100 + 24 * n))   # a real drop: does not revert
+        if n not in (2, 3):
+            rows.append(("C", n, 1000 + 24 * n))                      # a 3-day gap: 72 h is fine
+    f = pl.DataFrame(rows, schema={"serial_number": pl.Utf8, "n": pl.Int64, "smart_9_raw": pl.Int64}, orient="row")
+    f = f.with_columns(pl.col("n").map_elements(day, return_dtype=pl.Date).alias("date"))
+    out = {r["date"]: r for r in tool.anomalies(f, margin=24).iter_rows(named=True)}
+    assert (out[day(5)]["steps"], out[day(5)]["impossible"], out[day(5)]["reverted"]) == (4, 2, 1)   # B reverts
+    assert (out[day(6)]["impossible"], out[day(6)]["reverted"]) == (1, 0)                         # B steps back
+    assert out[day(4)]["impossible"] == 0                                                          # C's gap
+    assert all(out[day(n)]["impossible"] == 0 for n in (1, 2, 3, 7, 8, 9))

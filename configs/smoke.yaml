@@ -24,6 +24,7 @@ selection:
   boot_share: 0.95            # boot model: this share of rows with empty slot or no SMART
 
 dropped_days: {}              # day files left out as a whole (see full.yaml)
+smart_missing_days: {}        # days whose SMART values are not readings (see full.yaml)
 
 budget:
   margin_bytes: 1000000000    # keep this much free on each disk

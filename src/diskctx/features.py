@@ -4,7 +4,9 @@ Timing rule, the same for every feature: a feature at drive-day t uses only rows
 <= t-1 (labels cover (t, t+N]). A *reading* of a column is a row of the drive where that
 column is not null. Every feature is computed as of the drive's last reading a <= t-1 of
 its column and carried forward, so a silent drive keeps its last values. Missingness is
-never a feature (no "is null" or "days since" columns; XGBoost learns from NaN).
+never a feature (no "is null" or "days since" columns; XGBoost learns from NaN). A day in
+the config's smart_missing_days (scrambled SMART values) gives no SMART readings: its rows
+stay as samples, and their failure events stay.
   value     the column at a.
   delta_k   per-day change over k days: (x_a - x_b) / (a - b) in calendar days, where b is
             the last reading <= a - k, else the drive's earliest reading. Null only if the
@@ -265,7 +267,7 @@ def new_state(con, settings):
     con.execute("CREATE OR REPLACE TABLE carry_pod (serial_number VARCHAR, date DATE, pod_key VARCHAR)")
 
 
-def run_period(con, settings, start, end, model=None, own_rate=None):
+def run_period(con, settings, start, end, model=None, own_rate=None, smart_missing=()):
     """Features for the period [start, end] of one model.
 
     Needs the tables `frame` (the model's rows dated start - warmup .. end) and `want`
@@ -273,6 +275,8 @@ def run_period(con, settings, start, end, model=None, own_rate=None):
     given, also the pod tables pod_days, pod_models, events and rates (P). Creates `feat`
     (one row per wanted drive-day: the as-of inputs every group's SQL reads) and updates
     the carried rows for the next period, which must start at end + 1.
+    smart_missing: days (config smart_missing_days) whose SMART values are not readings;
+    their rows still count for capacity, slot, pod_key and the drive's own days.
     Returns {column: counter resets on readings dated start .. end} for 241/242."""
     w = warmup_days(settings)
     windows = settings["windows"]
@@ -281,6 +285,10 @@ def run_period(con, settings, start, end, model=None, own_rate=None):
     lba = sql_list(f"smart_{i}" for i in LBA_IDS)
 
     # 1. readings: one row per drive, column and day that has a value
+    if smart_missing:
+        days = ", ".join(f"DATE '{d}'" for d in smart_missing)
+        cols = {name: f"CASE WHEN date IN ({days}) THEN NULL ELSE {expr} END" if name.startswith("smart_") else expr
+                for name, expr in cols.items()}
     unpivot = ", ".join(f"({expr})::BIGINT AS {name}" for name, expr in cols.items())
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE readings AS
@@ -473,7 +481,8 @@ def feature_sql(columns):
     return ", ".join(f"CAST({expr} AS FLOAT) AS {name}" for name, expr in columns.items())
 
 
-def compute_features(rows, want, settings, columns, resources, pods=None, model=None, periods=None):
+def compute_features(rows, want, settings, columns, resources, pods=None, model=None, periods=None,
+                     smart_missing=()):
     """Features `columns` ({name: SQL}) for the drive-days `want` (serial_number, date),
     from one model's drive-day `rows` (pass-2 columns). pods: {pod_days, pod_models, events,
     rates} polars frames for P. periods: [(start, end), ...], contiguous, default one period
@@ -499,7 +508,7 @@ def compute_features(rows, want, settings, columns, resources, pods=None, model=
                 schema = POD_TABLES[name]
                 register(con, name, pods[name].select(list(schema)).cast(schema)
                          .filter(pl.col("date").is_between(since, end)))
-        for col, n in run_period(con, settings, start, end, model, own_rate).items():
+        for col, n in run_period(con, settings, start, end, model, own_rate, smart_missing).items():
             resets[col] = resets.get(col, 0) + n
         out.append(con.execute(f"SELECT serial_number, date, {feature_sql(columns)} FROM feat "
                                f"ORDER BY serial_number, date").pl())
@@ -783,7 +792,9 @@ def read_sampling_r(storage):
     return out
 
 
-def model_stage(cfg, model, studies):
+def model_stage(cfg, model, studies, smart_missing=()):
+    """smart_missing: the config's smart_missing_days that fall in a quarter where the model
+    has rows; they are in the stage params, so adding one reruns only those models."""
     settings, horizons = cfg["features"], cfg["horizons"]
     folder = {study: f"features/{study}/{model_dir(model)}" for study in studies}
 
@@ -849,7 +860,8 @@ def model_stage(cfg, model, studies):
                         "SELECT count(*) FROM samples WHERE study = 'P'").fetchone()[0] > 0
                     if with_pods:
                         load_pod_tables(con, storage, quarter, start - timedelta(days=w + 1), model)
-                resets[quarter] = run_period(con, settings, start, end, model, own_rate if with_pods else None)
+                resets[quarter] = run_period(con, settings, start, end, model, own_rate if with_pods else None,
+                                             smart_missing)
                 if samples is None:
                     continue
                 for study, split in con.execute("SELECT DISTINCT study, split FROM samples").fetchall():
@@ -874,7 +886,9 @@ def model_stage(cfg, model, studies):
 
     deps = ["splits", "features_sampling", *(["features_rates"] if "P" in studies else [])]
     return Stage(name=f"features_{model_dir(model)}", tier=DURABLE, outputs=list(folder.values()), build=build,
-                 keys=["data_source", "seed", "features"], deps=deps, params={"model": model})
+                 keys=["data_source", "seed", "features"], deps=deps,
+                 params={"model": model, **({"smart_missing_days": [str(d) for d in smart_missing]}
+                                            if smart_missing else {})})
 
 
 def keep_samples(con, samples, r_by_study, seed, near_days):
@@ -928,6 +942,16 @@ def write_split(con, writer, schema, study, split, horizons, columns, data_sourc
     return n
 
 
+def smart_missing_of(cfg, storage, model):
+    """The config's smart_missing_days in quarters where `model` has pass-2 rows."""
+    days = []
+    for day in sorted(parse_date(d) for d in cfg["smart_missing_days"]):
+        path = storage.path(DURABLE, parquet_path(model, quarter_name(day)))
+        if path.exists() and pq.ParquetFile(path).metadata.num_rows > 0:
+            days.append(day)
+    return days
+
+
 def feature_stages(cfg, storage, models):
     """features_sampling, features_rates (if Study P has models) and one stage per model in
     a study. Needs splits/windows.csv, so it is built after the splits stage ran."""
@@ -939,7 +963,7 @@ def feature_stages(cfg, storage, models):
         studies = [s for s in cfg["studies"]
                    if not windows.filter((pl.col("study") == s) & (pl.col("model") == model)).is_empty()]
         if studies:
-            stages.append(model_stage(cfg, model, studies))
+            stages.append(model_stage(cfg, model, studies, smart_missing_of(cfg, storage, model)))
     return stages
 
 

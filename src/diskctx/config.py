@@ -36,6 +36,7 @@ REQUIRED_KEYS = (
     "selection",
     "budget",
     "dropped_days",
+    "smart_missing_days",
     "splits",
     "studies",
     "features",
@@ -119,7 +120,8 @@ def check_config(cfg):
     missing_budget = [k for k in BUDGET_KEYS if k not in cfg["budget"]]
     if missing_budget:
         raise ConfigError(f"budget is missing keys: {missing_budget}")
-    check_dropped_days(cfg["dropped_days"])
+    check_day_evidence("dropped_days", cfg["dropped_days"])
+    check_day_evidence("smart_missing_days", cfg["smart_missing_days"])
     check_splits(cfg["splits"])
     check_studies(cfg["studies"])
     check_features(cfg["features"], smart_ids)
@@ -128,17 +130,20 @@ def check_config(cfg):
         raise ConfigError(f"resources is missing keys: {missing_resources}")
 
 
-def check_dropped_days(days):
-    """{day: evidence}: day files left out as a whole (the day counts as missing)."""
+def check_day_evidence(key, days):
+    """{day: evidence} for `key`:
+    dropped_days        day files left out as a whole (the day counts as missing);
+    smart_missing_days  days whose SMART values are not readings (features only); the
+                        rows stay, and so do their failure events."""
     if not isinstance(days, dict):
-        raise ConfigError("dropped_days must be a mapping {YYYY-MM-DD: evidence} (may be empty)")
+        raise ConfigError(f"{key} must be a mapping {{YYYY-MM-DD: evidence}} (may be empty)")
     for day, why in days.items():
         try:
             parse_date(day)
         except ValueError:
-            raise ConfigError(f"dropped_days: {day!r} is not a YYYY-MM-DD date") from None
+            raise ConfigError(f"{key}: {day!r} is not a YYYY-MM-DD date") from None
         if not isinstance(why, str) or not why.strip():
-            raise ConfigError(f"dropped_days: {day} needs the evidence as text")
+            raise ConfigError(f"{key}: {day} needs the evidence as text")
 
 
 def dropped_days(cfg, quarter):
